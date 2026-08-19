@@ -152,17 +152,6 @@ class Settings(BaseSettings):
         default=8000,
         description="Sample rate (Hz) for the SFVoPI media stream.",
     )
-    SUPERFONE_WHATSAPP_WEBHOOK_SHARED_SECRET: SecretStr = Field(
-        default=SecretStr(""),
-        description=(
-            "Shared secret embedded as a query token in the WhatsApp (Dragonfly) "
-            "webhook URL we give Superfone to register (there is no self-service "
-            "registration API for it, and no signature/auth header exists on this "
-            "webhook stream either, per Superfone's own docs) -- same URL-embedded-"
-            "token pattern as SUPERFONE_WEBHOOK_SHARED_SECRET, but a separate secret "
-            "value so the two webhook streams can be rotated independently."
-        ),
-    )
 
     TRUST_PROXY_HEADERS: bool = Field(
         default=False,
