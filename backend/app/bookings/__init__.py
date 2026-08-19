@@ -1,0 +1,1 @@
+"""Property Booking Domain Package."""

@@ -1,0 +1,163 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "real-estate-crm-backend"
+version = "1.0.0"
+description = "Multi-Tenant Real Estate CRM + AI Voice Sales Platform — FastAPI Backend"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+
+dependencies = [
+    # Web framework
+    "fastapi[standard]>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+
+    # Configuration
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+
+    # Database
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+
+    # Redis
+    "redis[asyncio]>=5.2.0",
+
+    # JWT / Security
+    "python-jose[cryptography]>=3.3.0",
+
+    # Logging
+    "structlog>=24.4.0",
+    "python-json-logger>=2.0.7",
+
+    # Outbound HTTP client (Superfone telephony integration)
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.27.0",
+    "anyio>=4.6.0",
+
+    # Linting / Formatting
+    "ruff>=0.8.0",
+
+    # Type checking
+    "mypy>=1.13.0",
+    "types-python-jose>=3.3.0",
+
+    # SQLAlchemy type stubs
+    "sqlalchemy[mypy]>=2.0.36",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+# =============================================================================
+# RUFF — Linter + Formatter
+# =============================================================================
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "ARG",  # flake8-unused-arguments
+    "SIM",  # flake8-simplify
+    "TCH",  # flake8-type-checking
+    "ANN",  # flake8-annotations (type hints)
+    "S",    # bandit security checks
+    "N",    # pep8-naming
+    "PT",   # flake8-pytest-style
+    "RET",  # flake8-return
+    "ERA",  # eradicate (commented-out code)
+    "PIE",  # flake8-pie
+    "T20",  # flake8-print (no print statements in production)
+    "LOG",  # flake8-logging
+]
+ignore = [
+    "ANN204",  # Missing return type annotation for special method
+    "S101",    # Use of assert — needed in tests
+    "B008",    # Do not perform function calls in default args — FastAPI Depends() pattern
+    "ERA001",  # Commented-out code — allow in migration context references
+    "ANN401",  # Allow Any in generic redaction utilities
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "ANN",  # Don't require type annotations in tests
+    "S",    # Allow security-test patterns
+    "T20",  # Allow print in tests
+    "ARG",  # Allow unused fixture args
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+# =============================================================================
+# MYPY — Type Checking
+# =============================================================================
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+extra_checks = true
+
+# SQLAlchemy plugin for better type inference
+plugins = ["sqlalchemy.ext.mypy.plugin"]
+
+[[tool.mypy.overrides]]
+module = ["jose.*", "structlog.*", "pythonjsonlogger.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+strict = false
+
+# =============================================================================
+# PYTEST
+# =============================================================================
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:asyncpg",
+    "ignore::PendingDeprecationWarning",
+]
+markers = [
+    "unit: Unit tests (no external dependencies)",
+    "integration: Integration tests (requires DB and Redis)",
+    "security: Security-focused tests",
+]
