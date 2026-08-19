@@ -3,11 +3,13 @@
 import logging
 from datetime import UTC, datetime, timedelta
 from math import ceil
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleError, NotFoundError
+from app.integrations.whatsapp.factory import get_client_for_tenant
 from app.shared.schemas import PaginatedResponse, PaginationParams
 from app.whatsapp.repository import WhatsAppRepository
 from app.whatsapp.schemas import (
@@ -21,16 +23,6 @@ logger = logging.getLogger(__name__)
 
 _SESSION_WINDOW_HOURS = 24
 
-# Superfone's success response reports message_status="accepted"; our DB
-# enum (queued/sent/delivered/read/failed) has no "accepted" value -- the
-# closest honest fit is "sent" (we handed it off successfully). Anything
-# else unrecognized also falls back to "sent" rather than failing the send
-# that has, per the client's own 200-but-confirmed check, already succeeded.
-_PROVIDER_STATUS_TO_DB_STATUS = {
-    "accepted": "sent",
-    "sent": "sent",
-}
-
 
 class WhatsAppService:
     """Service for sending/listing WhatsApp messages and listing templates."""
@@ -40,10 +32,10 @@ class WhatsAppService:
         self.repository = WhatsAppRepository(session)
 
     async def send_message(
-        self, tenant_id: UUID, created_by: UUID | None, data: WhatsAppSendRequest  # noqa: ARG002
+        self, tenant_id: UUID, created_by: UUID | None, data: WhatsAppSendRequest
     ) -> WhatsAppMessageResponse:
         """Send a WhatsApp message, enforcing the 24-hour session-window
-        rule for non-template message types before ever calling Superfone."""
+        rule for non-template message types before ever calling Meta."""
         customer = await self.repository.get_customer(tenant_id, data.customer_id)
         if not customer:
             raise NotFoundError(
@@ -58,13 +50,82 @@ class WhatsAppService:
                     code="LEAD_NOT_FOUND",
                 )
 
-        raise BusinessRuleError(
-            message=(
-                "WhatsApp messaging is being migrated to a direct Meta "
-                "integration; this endpoint is temporarily unavailable."
-            ),
-            code="WHATSAPP_INTEGRATION_MIGRATING",
+        if data.message_type != "template":
+            await self._enforce_session_window(tenant_id, data.customer_id)
+
+        client = await get_client_for_tenant(self.session, tenant_id)
+        recipient = _to_whatsapp_recipient(customer["phone"])
+
+        if data.message_type == "template":
+            template_name = data.template_name
+            language = data.language
+            if not template_name or not language:
+                # Unreachable in practice -- WhatsAppSendRequest's own
+                # validator already guarantees this -- but never trust a
+                # narrowing assumption silently; fail with a clear error
+                # instead of an assert that vanishes under -O.
+                raise BusinessRuleError(
+                    message="template_name and language are required for type=template.",
+                    code="WHATSAPP_TEMPLATE_FIELDS_MISSING",
+                )
+            result = await client.send_template_message(
+                to=recipient,
+                template_name=template_name,
+                language=language,
+                components=data.components,
+                context_message_id=data.context_message_id,
+            )
+            content: dict[str, Any] = {
+                "templateName": template_name,
+                "language": language,
+                "components": data.components,
+            }
+        else:
+            message_body = data.message
+            if not message_body:
+                raise BusinessRuleError(
+                    message=f"message is required for type={data.message_type}.",
+                    code="WHATSAPP_MESSAGE_BODY_MISSING",
+                )
+            result = await client.send_message(
+                to=recipient,
+                message_type=data.message_type,
+                message=message_body,
+                context_message_id=data.context_message_id,
+            )
+            content = dict(message_body)
+
+        db_status = "sent"
+
+        row = await self.repository.create_message(
+            tenant_id=tenant_id,
+            customer_id=data.customer_id,
+            lead_id=data.lead_id,
+            direction="outbound",
+            provider_message_id=result["message_id"],
+            wa_id=recipient,
+            phone_to=recipient,
+            phone_from=None,
+            message_type=data.message_type,
+            content=content,
+            template_variables={},
+            status=db_status,
+            sent_at=datetime.now(UTC),
         )
+
+        await self.repository.add_communication_log(
+            tenant_id=tenant_id,
+            customer_id=data.customer_id,
+            lead_id=data.lead_id,
+            whatsapp_message_id=row["id"],
+            direction="outbound",
+            status=db_status,
+            summary=f"WhatsApp {data.message_type} message sent",
+            initiated_by="user" if created_by else "system",
+            initiated_by_id=created_by,
+        )
+
+        return WhatsAppMessageResponse.model_validate(row)
 
     async def list_messages(
         self,
@@ -85,17 +146,24 @@ class WhatsAppService:
         )
 
     async def list_templates(
-        self, refresh: bool = False  # noqa: ARG002
+        self, tenant_id: UUID, refresh: bool = False
     ) -> list[WhatsAppTemplateResponse]:
-        """List WhatsApp templates -- a live passthrough to Superfone/Meta,
-        not a read of the local whatsapp_templates table."""
-        raise BusinessRuleError(
-            message=(
-                "WhatsApp template listing is being migrated to a direct Meta "
-                "integration; this endpoint is temporarily unavailable."
-            ),
-            code="WHATSAPP_INTEGRATION_MIGRATING",
-        )
+        """List WhatsApp templates -- a live passthrough to Meta, not a
+        read of the local whatsapp_templates table."""
+        client = await get_client_for_tenant(self.session, tenant_id)
+        raw_templates = await client.list_templates(refresh=refresh)
+        return [
+            WhatsAppTemplateResponse(
+                id=str(t.get("id", "")),
+                name=t.get("name", ""),
+                language=t.get("language", ""),
+                status=t.get("status", ""),
+                category=t.get("category", ""),
+                parameter_format=t.get("parameter_format"),
+                components=t.get("components", []),
+            )
+            for t in raw_templates
+        ]
 
     async def _enforce_session_window(self, tenant_id: UUID, customer_id: UUID) -> None:
         """Reject a free-form (non-template) send outside WhatsApp's 24-hour

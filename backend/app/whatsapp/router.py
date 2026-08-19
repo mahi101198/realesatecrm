@@ -92,9 +92,12 @@ async def list_messages(
 )
 async def list_templates(
     refresh: Annotated[bool, Query(description="Bypass cache, pull fresh from Meta")] = False,
-    _context: RequestContext = Depends(require_permission(Permission.WHATSAPP_TEMPLATE_READ)),
+    context: RequestContext = Depends(require_permission(Permission.WHATSAPP_TEMPLATE_READ)),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[WhatsAppTemplateResponse]:
     """List WhatsApp templates endpoint."""
+    tenant_id = resolve_tenant_scope(context)
+    if tenant_id is None:
+        raise ValueError("Tenant scope is required to list WhatsApp templates.")
     service = WhatsAppService(session)
-    return await service.list_templates(refresh=refresh)
+    return await service.list_templates(tenant_id, refresh=refresh)
