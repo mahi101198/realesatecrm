@@ -1696,7 +1696,7 @@ async def test_send_message_uses_tenant_scoped_meta_client() -> None:
     service.repository.add_communication_log = AsyncMock(return_value=None)
 
     fake_client = AsyncMock()
-    fake_client.send_text_message = AsyncMock(return_value={"message_id": "wamid.XYZ"})
+    fake_client.send_message = AsyncMock(return_value={"message_id": "wamid.XYZ"})
 
     with patch(
         "app.whatsapp.service.get_client_for_tenant", new=AsyncMock(return_value=fake_client)
@@ -1710,7 +1710,15 @@ async def test_send_message_uses_tenant_scoped_meta_client() -> None:
         )
 
     mock_factory.assert_awaited_once_with(mock_session, tenant_id)
-    fake_client.send_text_message.assert_awaited_once()
+    # WhatsAppService.send_message calls client.send_message directly for
+    # non-template types (message_type="text" here), not send_text_message
+    # -- that convenience wrapper exists on MetaWhatsAppClient for other
+    # internal callers but is not this call site's path.
+    fake_client.send_message.assert_awaited_once()
+    send_kwargs = fake_client.send_message.call_args.kwargs
+    assert send_kwargs["to"] == "919999999999"
+    assert send_kwargs["message_type"] == "text"
+    assert send_kwargs["message"] == {"body": "hi"}
     stored_status = service.repository.create_message.call_args.kwargs["status"]
     assert stored_status == "sent"
 ```
