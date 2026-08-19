@@ -7,7 +7,7 @@ rather than raising and losing every other event in the same delivery)."""
 import logging
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def parse_webhook_events(payload: dict[str, Any]) -> list[WebhookEvent]:
                     events.extend(_parse_messages_change(value))
                 elif field == "message_template_status_update":
                     events.append(_parse_template_status_change(value))
-            except (KeyError, IndexError, TypeError) as e:
+            except (KeyError, IndexError, TypeError, AttributeError, PydanticValidationError) as e:
                 logger.warning(
                     f"whatsapp webhook: skipping malformed change (field={field!r}): {e!s}"
                 )
@@ -82,44 +82,59 @@ def _parse_messages_change(value: dict[str, Any]) -> list[WebhookEvent]:
     contacts_by_wa_id = {c["wa_id"]: c for c in value.get("contacts", [])}
 
     for message in value.get("messages", []):
-        wa_id = message["from"]
-        contact = contacts_by_wa_id.get(wa_id)
-        contact_name = contact["profile"]["name"] if contact and contact.get("profile") else None
-        message_type = message.get("type", "text")
-        text = message.get(message_type, {}).get("body") if message_type == "text" else None
-        events.append(
-            InboundMessageEvent(
-                from_phone=wa_id,
-                contact_name=contact_name,
-                wa_message_id=message["id"],
-                text=text,
-                message_type=message_type,
-                timestamp=message.get("timestamp", ""),
+        try:
+            wa_id = message["from"]
+            contact = contacts_by_wa_id.get(wa_id)
+            contact_name = (
+                contact["profile"]["name"] if contact and contact.get("profile") else None
             )
-        )
+            message_type = message.get("type", "text")
+            text = message.get(message_type, {}).get("body") if message_type == "text" else None
+            events.append(
+                InboundMessageEvent(
+                    from_phone=wa_id,
+                    contact_name=contact_name,
+                    wa_message_id=message["id"],
+                    text=text,
+                    message_type=message_type,
+                    timestamp=message.get("timestamp", ""),
+                )
+            )
+        except (KeyError, IndexError, TypeError, AttributeError, PydanticValidationError) as e:
+            logger.warning(f"whatsapp webhook: skipping malformed message: {e!s}")
 
     for status_entry in value.get("statuses", []):
-        raw_status = status_entry["status"]
-        mapped_status = _STATUS_MAP.get(raw_status)
-        if mapped_status is None:
-            logger.warning(f"whatsapp webhook: unrecognized status {raw_status!r}, skipping")
-            continue
-        errors = status_entry.get("errors") or []
-        error_message = errors[0].get("message") if errors else None
-        events.append(
-            StatusUpdateEvent(
-                wa_message_id=status_entry["id"], status=mapped_status, error_message=error_message
+        try:
+            raw_status = status_entry["status"]
+            mapped_status = _STATUS_MAP.get(raw_status)
+            if mapped_status is None:
+                logger.warning(f"whatsapp webhook: unrecognized status {raw_status!r}, skipping")
+                continue
+            errors = status_entry.get("errors") or []
+            error_message = errors[0].get("message") if errors else None
+            events.append(
+                StatusUpdateEvent(
+                    wa_message_id=status_entry["id"],
+                    status=mapped_status,
+                    error_message=error_message,
+                )
             )
-        )
+        except (KeyError, IndexError, TypeError, AttributeError, PydanticValidationError) as e:
+            logger.warning(f"whatsapp webhook: skipping malformed status entry: {e!s}")
+            continue
 
     return events
 
 
 def _parse_template_status_change(value: dict[str, Any]) -> TemplateStatusUpdateEvent:
-    raw_status = value["event"]
-    mapped_status = _TEMPLATE_STATUS_MAP.get(raw_status, "paused")
-    return TemplateStatusUpdateEvent(
-        provider_template_id=str(value["message_template_id"]),
-        status=mapped_status,
-        rejection_reason=value.get("reason"),
-    )
+    try:
+        raw_status = value["event"]
+        mapped_status = _TEMPLATE_STATUS_MAP.get(raw_status, "paused")
+        return TemplateStatusUpdateEvent(
+            provider_template_id=str(value["message_template_id"]),
+            status=mapped_status,
+            rejection_reason=value.get("reason"),
+        )
+    except (KeyError, IndexError, TypeError, AttributeError, PydanticValidationError) as e:
+        logger.warning(f"whatsapp webhook: skipping malformed template status change: {e!s}")
+        raise
