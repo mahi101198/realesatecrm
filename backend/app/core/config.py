@@ -153,6 +153,29 @@ class Settings(BaseSettings):
         description="Sample rate (Hz) for the SFVoPI media stream.",
     )
 
+    WHATSAPP_CREDENTIALS_ENCRYPTION_KEY: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Base64-encoded 32-byte Fernet key used to encrypt each tenant's "
+            "Meta WhatsApp access_token and app_secret at rest in "
+            "whatsapp_tenant_configs. Generate with "
+            "`python -c \"from cryptography.fernet import Fernet; "
+            "print(Fernet.generate_key().decode())\"`. Required before any "
+            "tenant WhatsApp credentials can be stored or used -- "
+            "app/integrations/whatsapp/crypto.py fails closed if empty."
+        ),
+    )
+    WHATSAPP_DASHBOARD_CALL_AGENT_BEARER_SECRET: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Expected value of the Authorization: Bearer header on the "
+            "whatsapp_busness_dashboard product's call-agent trigger "
+            "requests (POST /webhooks/whatsapp-dashboard/call-agent). That "
+            "product is a separate, unmodified repository -- this secret is "
+            "configured as its CALL_AGENT_API_KEY environment variable."
+        ),
+    )
+
     TRUST_PROXY_HEADERS: bool = Field(
         default=False,
         description=(

@@ -122,6 +122,7 @@ class Permission(StrEnum):
     PLATFORM_USER_IMPERSONATE = "platform.user.impersonate"
     PLATFORM_BILLING_READ = "platform.billing.read"
     PLATFORM_ANALYTICS_READ = "platform.analytics.read"
+    PLATFORM_WHATSAPP_CONFIG_MANAGE = "platform.whatsapp_config.manage"
 
 
 def permission_code(permission: Permission | str) -> str:
