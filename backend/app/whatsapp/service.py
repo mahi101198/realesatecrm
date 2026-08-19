@@ -58,9 +58,12 @@ class WhatsAppService:
                     code="LEAD_NOT_FOUND",
                 )
 
-        raise NotImplementedError(
-            "WhatsApp messaging via Superfone has been removed. "
-            "Awaiting Meta WhatsApp Cloud API integration."
+        raise BusinessRuleError(
+            message=(
+                "WhatsApp messaging is being migrated to a direct Meta "
+                "integration; this endpoint is temporarily unavailable."
+            ),
+            code="WHATSAPP_INTEGRATION_MIGRATING",
         )
 
     async def list_messages(
@@ -81,12 +84,17 @@ class WhatsAppService:
             pages=pages,
         )
 
-    async def list_templates(self, refresh: bool = False) -> list[WhatsAppTemplateResponse]:
+    async def list_templates(
+        self, refresh: bool = False  # noqa: ARG002
+    ) -> list[WhatsAppTemplateResponse]:
         """List WhatsApp templates -- a live passthrough to Superfone/Meta,
         not a read of the local whatsapp_templates table."""
-        raise NotImplementedError(
-            "WhatsApp template listing via Superfone has been removed. "
-            "Awaiting Meta WhatsApp Cloud API integration."
+        raise BusinessRuleError(
+            message=(
+                "WhatsApp template listing is being migrated to a direct Meta "
+                "integration; this endpoint is temporarily unavailable."
+            ),
+            code="WHATSAPP_INTEGRATION_MIGRATING",
         )
 
     async def _enforce_session_window(self, tenant_id: UUID, customer_id: UUID) -> None:
