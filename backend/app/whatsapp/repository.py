@@ -234,6 +234,49 @@ class WhatsAppRepository:
             },
         )
 
+    async def get_lead_for_customer(
+        self, tenant_id: UUID, customer_id: UUID
+    ) -> dict[str, Any] | None:
+        """Fetch the most recently created lead for a customer, if any."""
+        result = await self.session.execute(
+            text(
+                """
+                SELECT * FROM public.leads
+                WHERE tenant_id = :tenant_id AND customer_id = :customer_id
+                  AND deleted_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": tenant_id, "customer_id": customer_id},
+        )
+        row = result.mappings().one_or_none()
+        return dict(row) if row else None
+
+    async def update_template_status_by_provider_id(
+        self, provider_template_id: str, status: str, rejection_reason: str | None
+    ) -> dict[str, Any] | None:
+        """Update a template's approval status by Meta's template ID."""
+        result = await self.session.execute(
+            text(
+                """
+                UPDATE public.whatsapp_templates
+                SET status = :status::public.whatsapp_template_status,
+                    rejection_reason = :rejection_reason,
+                    updated_at = NOW()
+                WHERE provider_template_id = :provider_template_id
+                RETURNING *
+                """
+            ),
+            {
+                "provider_template_id": provider_template_id,
+                "status": status,
+                "rejection_reason": rejection_reason,
+            },
+        )
+        row = result.mappings().one_or_none()
+        return dict(row) if row else None
+
     async def search(
         self,
         tenant_id: UUID,
