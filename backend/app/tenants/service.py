@@ -6,8 +6,14 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import NotFoundError, ValidationError
+from app.integrations.whatsapp.repository import WhatsAppTenantConfigRepository
 from app.tenants.repository import TenantRepository
-from app.tenants.schemas import TenantResponse, TenantUpdate
+from app.tenants.schemas import (
+    TenantResponse,
+    TenantUpdate,
+    WhatsAppConfigResponse,
+    WhatsAppConfigUpsertRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,3 +75,34 @@ class TenantService:
                 message=f"Tenant with ID '{tenant_id}' was not found.", code="TENANT_NOT_FOUND"
             )
         return TenantResponse.model_validate(updated_row)
+
+    async def upsert_whatsapp_config(
+        self, tenant_id: UUID, data: WhatsAppConfigUpsertRequest
+    ) -> WhatsAppConfigResponse:
+        """Create or rotate a tenant's Meta WhatsApp credentials."""
+        existing = await self.repository.get_by_id(tenant_id)
+        if not existing:
+            raise NotFoundError(
+                message=f"Tenant with ID '{tenant_id}' was not found.", code="TENANT_NOT_FOUND"
+            )
+        whatsapp_repo = WhatsAppTenantConfigRepository(self.repository.session)
+        row = await whatsapp_repo.upsert(
+            tenant_id=tenant_id,
+            waba_id=data.waba_id,
+            phone_number_id=data.phone_number_id,
+            verify_token=data.verify_token,
+            access_token_plain=data.access_token,
+            app_secret_plain=data.app_secret,
+        )
+        return WhatsAppConfigResponse.model_validate(row)
+
+    async def get_whatsapp_config(self, tenant_id: UUID) -> WhatsAppConfigResponse:
+        """Fetch a tenant's WhatsApp config metadata (never the secrets)."""
+        whatsapp_repo = WhatsAppTenantConfigRepository(self.repository.session)
+        row = await whatsapp_repo.get_public(tenant_id)
+        if not row:
+            raise NotFoundError(
+                message=f"Tenant '{tenant_id}' has no WhatsApp configuration.",
+                code="WHATSAPP_NOT_CONFIGURED",
+            )
+        return WhatsAppConfigResponse.model_validate(row)

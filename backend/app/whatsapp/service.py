@@ -9,7 +9,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleError, NotFoundError
-from app.integrations.superfone.factory import get_superfone_whatsapp_client
+from app.integrations.whatsapp.factory import get_client_for_tenant
 from app.shared.schemas import PaginatedResponse, PaginationParams
 from app.whatsapp.repository import WhatsAppRepository
 from app.whatsapp.schemas import (
@@ -23,16 +23,6 @@ logger = logging.getLogger(__name__)
 
 _SESSION_WINDOW_HOURS = 24
 
-# Superfone's success response reports message_status="accepted"; our DB
-# enum (queued/sent/delivered/read/failed) has no "accepted" value -- the
-# closest honest fit is "sent" (we handed it off successfully). Anything
-# else unrecognized also falls back to "sent" rather than failing the send
-# that has, per the client's own 200-but-confirmed check, already succeeded.
-_PROVIDER_STATUS_TO_DB_STATUS = {
-    "accepted": "sent",
-    "sent": "sent",
-}
-
 
 class WhatsAppService:
     """Service for sending/listing WhatsApp messages and listing templates."""
@@ -45,7 +35,7 @@ class WhatsAppService:
         self, tenant_id: UUID, created_by: UUID | None, data: WhatsAppSendRequest
     ) -> WhatsAppMessageResponse:
         """Send a WhatsApp message, enforcing the 24-hour session-window
-        rule for non-template message types before ever calling Superfone."""
+        rule for non-template message types before ever calling Meta."""
         customer = await self.repository.get_customer(tenant_id, data.customer_id)
         if not customer:
             raise NotFoundError(
@@ -63,7 +53,7 @@ class WhatsAppService:
         if data.message_type != "template":
             await self._enforce_session_window(tenant_id, data.customer_id)
 
-        client = get_superfone_whatsapp_client()
+        client = await get_client_for_tenant(self.session, tenant_id)
         recipient = _to_whatsapp_recipient(customer["phone"])
 
         if data.message_type == "template":
@@ -79,7 +69,7 @@ class WhatsAppService:
                     code="WHATSAPP_TEMPLATE_FIELDS_MISSING",
                 )
             result = await client.send_template_message(
-                recipient=recipient,
+                to=recipient,
                 template_name=template_name,
                 language=language,
                 components=data.components,
@@ -98,14 +88,14 @@ class WhatsAppService:
                     code="WHATSAPP_MESSAGE_BODY_MISSING",
                 )
             result = await client.send_message(
-                recipient=recipient,
+                to=recipient,
                 message_type=data.message_type,
                 message=message_body,
                 context_message_id=data.context_message_id,
             )
             content = dict(message_body)
 
-        db_status = _PROVIDER_STATUS_TO_DB_STATUS.get(result.get("message_status") or "", "sent")
+        db_status = "sent"
 
         row = await self.repository.create_message(
             tenant_id=tenant_id,
@@ -155,10 +145,12 @@ class WhatsAppService:
             pages=pages,
         )
 
-    async def list_templates(self, refresh: bool = False) -> list[WhatsAppTemplateResponse]:
-        """List WhatsApp templates -- a live passthrough to Superfone/Meta,
-        not a read of the local whatsapp_templates table."""
-        client = get_superfone_whatsapp_client()
+    async def list_templates(
+        self, tenant_id: UUID, refresh: bool = False
+    ) -> list[WhatsAppTemplateResponse]:
+        """List WhatsApp templates -- a live passthrough to Meta, not a
+        read of the local whatsapp_templates table."""
+        client = await get_client_for_tenant(self.session, tenant_id)
         raw_templates = await client.list_templates(refresh=refresh)
         return [
             WhatsAppTemplateResponse(

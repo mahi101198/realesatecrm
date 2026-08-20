@@ -152,15 +152,27 @@ class Settings(BaseSettings):
         default=8000,
         description="Sample rate (Hz) for the SFVoPI media stream.",
     )
-    SUPERFONE_WHATSAPP_WEBHOOK_SHARED_SECRET: SecretStr = Field(
+
+    WHATSAPP_CREDENTIALS_ENCRYPTION_KEY: SecretStr = Field(
         default=SecretStr(""),
         description=(
-            "Shared secret embedded as a query token in the WhatsApp (Dragonfly) "
-            "webhook URL we give Superfone to register (there is no self-service "
-            "registration API for it, and no signature/auth header exists on this "
-            "webhook stream either, per Superfone's own docs) -- same URL-embedded-"
-            "token pattern as SUPERFONE_WEBHOOK_SHARED_SECRET, but a separate secret "
-            "value so the two webhook streams can be rotated independently."
+            "Base64-encoded 32-byte Fernet key used to encrypt each tenant's "
+            "Meta WhatsApp access_token and app_secret at rest in "
+            "whatsapp_tenant_configs. Generate with "
+            "`python -c \"from cryptography.fernet import Fernet; "
+            "print(Fernet.generate_key().decode())\"`. Required before any "
+            "tenant WhatsApp credentials can be stored or used -- "
+            "app/integrations/whatsapp/crypto.py fails closed if empty."
+        ),
+    )
+    WHATSAPP_DASHBOARD_CALL_AGENT_BEARER_SECRET: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Expected value of the Authorization: Bearer header on the "
+            "whatsapp_busness_dashboard product's call-agent trigger "
+            "requests (POST /webhooks/whatsapp-dashboard/call-agent). That "
+            "product is a separate, unmodified repository -- this secret is "
+            "configured as its CALL_AGENT_API_KEY environment variable."
         ),
     )
 

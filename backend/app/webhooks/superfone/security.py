@@ -1,7 +1,6 @@
-"""Webhook authenticity checks for the three Superfone webhook streams.
-
-Superfone documents NO HMAC signature verification for any of them. They
-differ in what defense-in-depth is even possible:
+"""Webhook authenticity checks for the two Superfone webhook streams this
+backend still uses (SFVoPI call callbacks and CRM event notifications).
+Superfone documents NO HMAC signature verification for either.
 
   - SFVoPI (answer/ring/hangup): Superfone cannot be configured to add a
     custom auth header to these particular callbacks (they are set as plain
@@ -12,13 +11,6 @@ differ in what defense-in-depth is even possible:
     automations UI, which DOES support a custom `Authorization: Bearer
     <secret>` header per their own documented recommendation. We validate
     that header server-side.
-  - WhatsApp (Dragonfly) inbound messages/status updates: same situation as
-    SFVoPI -- no self-service registration API, no auth header support
-    (only a non-secret `x-app-name: dragonfly` product identifier, not a
-    credential). Superfone's own docs recommend the identical URL-embedded-
-    token approach used for SFVoPI, so that exact pattern is reused here
-    with its own dedicated secret (SUPERFONE_WHATSAPP_WEBHOOK_SHARED_SECRET)
-    so the two token-based streams can be rotated independently.
 
 All checks fail closed: missing/invalid credential -> reject before any DB
 write (skills/system.md rule #88).
@@ -46,24 +38,6 @@ def verify_sfvopi_webhook_token(token: str | None) -> None:
         raise UnauthorizedError(
             message="Invalid or missing Superfone webhook token.",
             code="SFVOPI_WEBHOOK_INVALID_TOKEN",
-        )
-
-
-def verify_whatsapp_webhook_token(token: str | None) -> None:
-    """Validate the shared-secret token embedded in the WhatsApp (Dragonfly)
-    webhook URL we gave Superfone to register. Same pattern as
-    verify_sfvopi_webhook_token, deliberately reused rather than
-    reinvented, but with its own dedicated secret."""
-    expected = settings.SUPERFONE_WHATSAPP_WEBHOOK_SHARED_SECRET.get_secret_value()
-    if not expected:
-        raise UnauthorizedError(
-            message="Superfone WhatsApp webhook authentication is not configured.",
-            code="WHATSAPP_WEBHOOK_NOT_CONFIGURED",
-        )
-    if not token or not hmac.compare_digest(token, expected):
-        raise UnauthorizedError(
-            message="Invalid or missing Superfone WhatsApp webhook token.",
-            code="WHATSAPP_WEBHOOK_INVALID_TOKEN",
         )
 
 

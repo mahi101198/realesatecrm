@@ -71,3 +71,31 @@ class TenantUpdate(BaseModel):
     timezone: str | None = None
     locale: str | None = None
     currency: str | None = None
+
+
+class WhatsAppConfigUpsertRequest(BaseModel):
+    """Request payload to create/rotate a tenant's Meta WhatsApp
+    credentials. All fields are plaintext here -- the only time these
+    secrets are ever transmitted as plaintext, over HTTPS, by an
+    already-authenticated super-admin. Encrypted at rest by
+    WhatsAppTenantConfigRepository.upsert."""
+
+    waba_id: str = Field(..., min_length=1)
+    phone_number_id: str = Field(..., min_length=1)
+    verify_token: str = Field(..., min_length=1)
+    access_token: str = Field(..., min_length=1)
+    app_secret: str = Field(..., min_length=1)
+
+
+class WhatsAppConfigResponse(BaseModel):
+    """Tenant WhatsApp config metadata -- deliberately excludes
+    verify_token, access_token, and app_secret. Never add them here."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    tenant_id: UUID
+    waba_id: str
+    phone_number_id: str
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime

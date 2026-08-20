@@ -162,30 +162,37 @@ class WhatsAppRepository:
         row = result.mappings().one_or_none()
         return dict(row) if row else None
 
-    async def find_customer_by_phone_cross_tenant(self, phone: str) -> dict[str, Any] | None:
-        """Look up a customer by phone number WITHOUT a tenant_id filter --
-        the one deliberate exception to this codebase's tenant-scoping rule
-        in this module, and only usable to bootstrap tenant attribution for
-        an inbound WhatsApp message where no tenant signal exists otherwise
-        (single shared platform-wide Superfone credential, same limitation
-        already documented for CDR webhook events).
-
-        Returns the single matching row, but ONLY if the phone number is
-        unambiguous (exactly one non-deleted customer across ALL tenants
-        has it) -- if zero or two-or-more tenants have a customer with this
-        phone, returns None so the caller treats it as an unattributable
-        "cold" event rather than guessing which tenant it belongs to.
-        """
+    async def find_customer_by_phone(self, tenant_id: UUID, phone: str) -> dict[str, Any] | None:
+        """Look up a customer by phone within a tenant (tenant is always
+        known here -- from RequestContext for outbound sends, from the
+        webhook URL path for inbound messages)."""
         result = await self.session.execute(
             text(
-                "SELECT * FROM public.customers WHERE phone = :phone AND deleted_at IS NULL"
+                "SELECT * FROM public.customers "
+                "WHERE tenant_id = :tenant_id AND phone = :phone AND deleted_at IS NULL"
             ),
-            {"phone": phone},
+            {"tenant_id": tenant_id, "phone": phone},
         )
-        rows = result.mappings().all()
-        if len(rows) != 1:
-            return None
-        return dict(rows[0])
+        row = result.mappings().one_or_none()
+        return dict(row) if row else None
+
+    async def create_minimal_customer(
+        self, tenant_id: UUID, phone: str, full_name: str
+    ) -> dict[str, Any]:
+        """Auto-create a customer for a first-contact inbound WhatsApp
+        sender with no existing CRM record. Only the required columns are
+        set; every other column takes its schema default."""
+        result = await self.session.execute(
+            text(
+                """
+                INSERT INTO public.customers (tenant_id, phone, full_name)
+                VALUES (:tenant_id, :phone, :full_name)
+                RETURNING *
+                """
+            ),
+            {"tenant_id": tenant_id, "phone": phone, "full_name": full_name},
+        )
+        return dict(result.mappings().one())
 
     async def add_communication_log(
         self,
@@ -226,6 +233,49 @@ class WhatsAppRepository:
                 "initiated_by_id": initiated_by_id,
             },
         )
+
+    async def get_lead_for_customer(
+        self, tenant_id: UUID, customer_id: UUID
+    ) -> dict[str, Any] | None:
+        """Fetch the most recently created lead for a customer, if any."""
+        result = await self.session.execute(
+            text(
+                """
+                SELECT * FROM public.leads
+                WHERE tenant_id = :tenant_id AND customer_id = :customer_id
+                  AND deleted_at IS NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": tenant_id, "customer_id": customer_id},
+        )
+        row = result.mappings().one_or_none()
+        return dict(row) if row else None
+
+    async def update_template_status_by_provider_id(
+        self, provider_template_id: str, status: str, rejection_reason: str | None
+    ) -> dict[str, Any] | None:
+        """Update a template's approval status by Meta's template ID."""
+        result = await self.session.execute(
+            text(
+                """
+                UPDATE public.whatsapp_templates
+                SET status = :status::public.whatsapp_template_status,
+                    rejection_reason = :rejection_reason,
+                    updated_at = NOW()
+                WHERE provider_template_id = :provider_template_id
+                RETURNING *
+                """
+            ),
+            {
+                "provider_template_id": provider_template_id,
+                "status": status,
+                "rejection_reason": rejection_reason,
+            },
+        )
+        row = result.mappings().one_or_none()
+        return dict(row) if row else None
 
     async def search(
         self,

@@ -18,7 +18,12 @@ from app.auth.dependencies import get_request_context_dep, require_permission
 from app.core.permissions import Permission, ensure_tenant_resource_access
 from app.core.request_context import RequestContext
 from app.db.session import get_db_session
-from app.tenants.schemas import TenantResponse, TenantUpdate
+from app.tenants.schemas import (
+    TenantResponse,
+    TenantUpdate,
+    WhatsAppConfigResponse,
+    WhatsAppConfigUpsertRequest,
+)
 from app.tenants.service import TenantService
 
 router = APIRouter(prefix="/tenants", tags=["Tenant Admin"])
@@ -68,3 +73,46 @@ async def update_tenant(
     ensure_tenant_resource_access(context, tenant_id)
     service = TenantService(session)
     return await service.update_tenant(tenant_id, data)
+
+
+@router.put(
+    "/{tenant_id}/whatsapp-config",
+    response_model=WhatsAppConfigResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Create/Rotate Tenant WhatsApp Config",
+    description=(
+        "Create or rotate a tenant's Meta WhatsApp Cloud API credentials. "
+        "Super-admin only. Secrets are encrypted at rest and never echoed "
+        "back in this or any other response."
+    ),
+)
+async def upsert_tenant_whatsapp_config(
+    tenant_id: UUID,
+    data: WhatsAppConfigUpsertRequest,
+    _context: RequestContext = Depends(
+        require_permission(Permission.PLATFORM_WHATSAPP_CONFIG_MANAGE)
+    ),
+    session: AsyncSession = Depends(get_db_session),
+) -> WhatsAppConfigResponse:
+    """Upsert tenant WhatsApp config endpoint."""
+    service = TenantService(session)
+    return await service.upsert_whatsapp_config(tenant_id, data)
+
+
+@router.get(
+    "/{tenant_id}/whatsapp-config",
+    response_model=WhatsAppConfigResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Tenant WhatsApp Config",
+    description="Fetch a tenant's WhatsApp config metadata (never secrets). Super-admin only.",
+)
+async def get_tenant_whatsapp_config(
+    tenant_id: UUID,
+    _context: RequestContext = Depends(
+        require_permission(Permission.PLATFORM_WHATSAPP_CONFIG_MANAGE)
+    ),
+    session: AsyncSession = Depends(get_db_session),
+) -> WhatsAppConfigResponse:
+    """Get tenant WhatsApp config endpoint."""
+    service = TenantService(session)
+    return await service.get_whatsapp_config(tenant_id)
