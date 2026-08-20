@@ -48,6 +48,7 @@ from app.tenants.router import router as tenants_router
 from app.users.router import router as users_router
 from app.webhooks.superfone.router import router as superfone_webhooks_router
 from app.webhooks.whatsapp.router import router as whatsapp_webhooks_router
+from app.webhooks.whatsapp_dashboard.router import router as whatsapp_dashboard_router
 from app.whatsapp.router import router as whatsapp_router
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,7 @@ app.include_router(ownerships_router, prefix=API_V1_PREFIX)
 app.include_router(public_intake_router, prefix=API_V1_PREFIX)
 app.include_router(superfone_webhooks_router, prefix=API_V1_PREFIX)
 app.include_router(whatsapp_webhooks_router, prefix=API_V1_PREFIX)
+app.include_router(whatsapp_dashboard_router, prefix=API_V1_PREFIX)
 app.include_router(whatsapp_router, prefix=API_V1_PREFIX)
 app.include_router(users_router, prefix=API_V1_PREFIX)
 app.include_router(tenants_router, prefix=API_V1_PREFIX)
