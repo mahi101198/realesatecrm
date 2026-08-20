@@ -48,6 +48,13 @@ Full repository/service/router stack per domain, all tenant-scoped and permissio
 - **Idempotency & audit**: write-tool calls are idempotency-keyed and logged to `activities` for traceability.
 - **Hindi/English intent mapping**: conversational statement → tool-selection test coverage for the voice agent's dialogue layer.
 
+### Phase 5 — Multi-Tenant Direct-Meta WhatsApp Integration
+
+- **Per-tenant Meta credentials**: `whatsapp_tenant_configs` (migration 029) stores each tenant's WABA ID, phone number ID, and Fernet-encrypted access token/app secret. Managed via a super-admin-only admin API (`PUT`/`GET /api/v1/tenants/{tenant_id}/whatsapp-config`).
+- **Send/list**: `app/whatsapp/` — send a message (`POST /api/v1/whatsapp/messages`, template or free-form within the 24-hour session window), list message history, list live-synced templates. Goes directly to Meta's Graph API per tenant, no intermediary provider.
+- **Inbound webhook**: `GET`/`POST /api/v1/webhooks/whatsapp/{tenant_id}` — tenant-scoped Meta webhook receiver (routed by tenant ID in the URL path, HMAC-SHA256 signature verified per tenant). Persists inbound messages (auto-creating a minimal customer record for first-contact numbers) and delivery/template status updates. No AI auto-reply in this phase.
+- **Dashboard call-escalation bridge**: `POST /api/v1/webhooks/whatsapp-dashboard/call-agent` — a narrow, separately-authenticated endpoint serving the one WhatsApp Business dashboard product still running its own (unrelated) Meta integration for a single tenant. Resolves phone → tenant/customer/lead and either places an immediate outbound Superfone call or queues one.
+
 ---
 
 ## Directory Structure
@@ -67,6 +74,13 @@ backend/
 │   ├── appointments/         # Site-visit appointment domain
 │   ├── followups/            # Follow-up domain
 │   ├── agent/                # AI voice agent: tools, orchestrator, gateway, router
+│   ├── integrations/
+│   │   ├── superfone/         # SFVoPI (AI calls) + CRM (click-to-call)
+│   │   └── whatsapp/          # Meta WhatsApp Cloud API client + per-tenant factory
+│   ├── webhooks/
+│   │   ├── superfone/         # SFVoPI + CRM event webhooks
+│   │   ├── whatsapp/          # Tenant-scoped Meta WhatsApp webhook receiver
+│   │   └── whatsapp_dashboard/ # Call-agent trigger for the dashboard product
 │   └── shared/                # Shared types & utilities
 ├── docs/
 │   └── security-flow.md
@@ -155,6 +169,5 @@ docker compose up --build
 ## Not Yet Implemented
 
 - **Voice/telephony provider integration** — LiveKit and a telephony provider (e.g. Supaphone) are not wired up. What exists is the orchestration layer an external voice agent calls into (pre-call context, tool execution, call-job lifecycle) — not the live voice pipeline itself.
-- **WhatsApp messaging** — DB schema is ready (`whatsapp_templates`, `whatsapp_messages`, `communication_logs` in `008_communication.sql`), but there's no `app/` module or router sending/receiving messages yet.
 - **Role assign/remove and tenant CRUD admin APIs** — not yet exposed via HTTP.
 - **Schema migrations tooling** — Supabase PostgreSQL migrations in `supabase/migrations/` remain hand-authored SQL; no migration framework (e.g. Alembic) is wired into the app.
