@@ -59,7 +59,8 @@ class CallContextService:
 
 
 class CallOrchestrator:
-    """Call job orchestrator managing queue execution, state machine, DNC rules, priority, and concurrency."""
+    """Call job orchestrator managing queue execution, state machine, DNC
+    rules, priority, and concurrency."""
 
     def __init__(self, session: AsyncSession, max_concurrent_calls: int = 10) -> None:
         self.session = session
@@ -72,7 +73,8 @@ class CallOrchestrator:
         start_hour: int = 9,
         end_hour: int = 20,
     ) -> bool:
-        """Verify whether current call attempt falls within allowed local calling hours (09:00 - 20:00 IST)."""
+        """Verify whether current call attempt falls within allowed local
+        calling hours (09:00 - 20:00 IST)."""
         now = current_time or datetime.now(UTC)
         current_hour = now.hour
         return start_hour <= current_hour < end_hour
@@ -143,7 +145,8 @@ class CallOrchestrator:
     async def get_next_eligible_jobs(
         self, tenant_id: UUID | None = None, limit: int = 5
     ) -> list[dict[str, Any]]:
-        """Fetch next ready call jobs ordered by priority (higher priority first) and schedule time."""
+        """Fetch next ready call jobs ordered by priority (higher priority
+        first) and schedule time."""
         sql = text(
             """
             SELECT cj.*, l.lead_score
@@ -154,7 +157,7 @@ class CallOrchestrator:
               AND cj.scheduled_at <= NOW()
               AND cj.attempt_count < cj.max_attempts
               AND c.do_not_call = FALSE
-              AND (:tenant_id::uuid IS NULL OR cj.tenant_id = :tenant_id)
+              AND (CAST(:tenant_id AS uuid) IS NULL OR cj.tenant_id = CAST(:tenant_id AS uuid))
             ORDER BY
               cj.priority ASC,
               l.lead_score DESC,
@@ -166,12 +169,19 @@ class CallOrchestrator:
         return [dict(r) for r in res.mappings().all()]
 
     async def update_job_status(
-        self, tenant_id: UUID, call_job_id: UUID, new_status: str, error_code: str | None = None, error_message: str | None = None
+        self,
+        tenant_id: UUID,
+        call_job_id: UUID,
+        new_status: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
     ) -> dict[str, Any]:
         """Safely transition call job status with validation."""
         job = await self.repository.claim_job_for_update(tenant_id, call_job_id)
         if not job:
-            raise NotFoundError(message=f"Call job '{call_job_id}' not found.", code="JOB_NOT_FOUND")
+            raise NotFoundError(
+                message=f"Call job '{call_job_id}' not found.", code="JOB_NOT_FOUND"
+            )
 
         current_status = str(job["status"])
         validate_job_status_transition(current_status, new_status)
@@ -179,7 +189,7 @@ class CallOrchestrator:
         sql = text(
             """
             UPDATE public.call_jobs
-            SET status = :new_status::public.call_job_status,
+            SET status = CAST(:new_status AS public.call_job_status),
                 last_error_code = COALESCE(:error_code, last_error_code),
                 last_error_message = COALESCE(:error_message, last_error_message),
                 updated_at = NOW()

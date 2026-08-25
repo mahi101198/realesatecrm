@@ -60,60 +60,15 @@ class PublicIntakeRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_customer_by_phone(self, tenant_id: UUID, phone: str) -> dict[str, Any] | None:
-        """Fetch a non-deleted customer by phone within tenant."""
-        result = await self.session.execute(
-            text(
-                """
-                SELECT * FROM public.customers
-                WHERE tenant_id = :tenant_id AND phone = :phone AND deleted_at IS NULL
-                """
-            ),
-            {"tenant_id": tenant_id, "phone": phone},
-        )
-        row = result.mappings().one_or_none()
-        return dict(row) if row else None
-
-    async def create_minimal_customer(
-        self,
-        tenant_id: UUID,
-        full_name: str,
-        phone: str,
-        email: str | None,
-        lead_source_id: UUID | None,
-    ) -> dict[str, Any] | None:
-        """Insert a minimal customer record from public intake fields only.
-
-        Uses ON CONFLICT DO NOTHING against the same partial unique index
-        customers already enforces (uq_customers_tenant_phone_active on
-        (tenant_id, phone) WHERE deleted_at IS NULL), so a race between two
-        concurrent first-time submissions for the same phone number never
-        raises a raw IntegrityError -- it just returns None here, and the
-        caller (PublicIntakeService._find_or_create_customer) re-fetches the
-        row the other request won.
-        """
-        result = await self.session.execute(
-            text(
-                """
-                INSERT INTO public.customers (
-                    tenant_id, full_name, phone, email, lead_source_id
-                ) VALUES (
-                    :tenant_id, :full_name, :phone, :email, :lead_source_id
-                )
-                ON CONFLICT (tenant_id, phone) WHERE deleted_at IS NULL DO NOTHING
-                RETURNING *
-                """
-            ),
-            {
-                "tenant_id": tenant_id,
-                "full_name": full_name,
-                "phone": phone,
-                "email": email,
-                "lead_source_id": lead_source_id,
-            },
-        )
-        row = result.mappings().one_or_none()
-        return dict(row) if row else None
+    # NOTE: get_customer_by_phone / create_minimal_customer used to live here.
+    # Their find-or-create (including the ON CONFLICT DO NOTHING arbiter that
+    # matches uq_customers_tenant_phone_active) is now the single shared path
+    # in app/customers/resolver.py::ContactResolver.resolve_contact.
+    #
+    # create_minimal_lead below is intentionally NOT replaced by LeadResolver:
+    # a public enquiry always opens a NEW lead and returns its lead_number as
+    # the visitor's reference, whereas LeadResolver deliberately REUSES an open
+    # lead. Those are different contracts, not duplicated logic.
 
     async def create_minimal_lead(
         self,

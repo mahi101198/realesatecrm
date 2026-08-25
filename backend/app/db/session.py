@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import AsyncGenerator
+from typing import Any
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -24,6 +25,11 @@ def init_db_engine() -> AsyncEngine:
     global engine, async_session_factory
 
     db_url = settings.DATABASE_URL.get_secret_value()
+    connect_args: dict[str, Any] = {}
+    if "supabase.com" in db_url or "supabase.co" in db_url:
+        # asyncpg does not honor libpq sslmode query params; require TLS explicitly.
+        connect_args["ssl"] = True
+        connect_args["timeout"] = 30
 
     engine = create_async_engine(
         db_url,
@@ -32,6 +38,7 @@ def init_db_engine() -> AsyncEngine:
         pool_timeout=settings.DB_POOL_TIMEOUT,
         pool_pre_ping=True,
         echo=settings.DEBUG,
+        connect_args=connect_args,
     )
 
     async_session_factory = async_sessionmaker(

@@ -1,8 +1,9 @@
 """FastAPI Application Entrypoint & Infrastructure Configuration."""
 
+import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from fastapi import FastAPI, status
@@ -34,8 +35,9 @@ from app.core.middleware import (
 )
 from app.core.request_context import get_request_id
 from app.customers.router import router as customers_router
+from app.db import session as db_session
 from app.db.redis import close_redis, get_redis_client, init_redis
-from app.db.session import close_db_engine, engine, init_db_engine
+from app.db.session import close_db_engine, init_db_engine
 from app.followups.router import router as followups_router
 from app.leads.router import router as leads_router
 from app.locations.router import router as locations_router
@@ -46,10 +48,13 @@ from app.public_intake.router import router as public_intake_router
 from app.sales.router import router as sales_router
 from app.tenants.router import router as tenants_router
 from app.users.router import router as users_router
+from app.voice.pipeline import register_inference_providers
+from app.voice.router import router as voice_router
 from app.webhooks.superfone.router import router as superfone_webhooks_router
 from app.webhooks.whatsapp.router import router as whatsapp_webhooks_router
 from app.webhooks.whatsapp_dashboard.router import router as whatsapp_dashboard_router
 from app.whatsapp.router import router as whatsapp_router
+from app.workers.call_scheduler import run_call_scheduler_loop
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +72,24 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # 3. Initialize Ephemeral Redis Client
     await init_redis()
 
+    # 4. Register the AI voice agent's speech providers (LiveKit Inference).
+    #    Config-driven and fail-open: with the VOICE_* model settings empty this
+    #    registers nothing, `VoiceService.preflight()` then reports the voice
+    #    layer as unconfigured, and Superfone media streams are accepted and
+    #    closed cleanly -- exactly as they are today.
+    register_inference_providers()
+
+    # 5. Start Background Call-Job Scheduler (Redis-locked, single dispatcher)
+    call_scheduler_task = asyncio.create_task(run_call_scheduler_loop())
+
     yield
 
-    # Shutdown sequence
+    # Shutdown sequence -- stop the scheduler before tearing down Redis/DB,
+    # since the loop depends on both.
     logger.info("Shutting down application resources...")
+    call_scheduler_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await call_scheduler_task
     await close_redis()
     await close_db_engine()
     logger.info("Application shutdown complete.")
@@ -139,6 +158,10 @@ app.include_router(whatsapp_router, prefix=API_V1_PREFIX)
 app.include_router(users_router, prefix=API_V1_PREFIX)
 app.include_router(tenants_router, prefix=API_V1_PREFIX)
 app.include_router(agent_router, prefix=API_V1_PREFIX)
+# The Superfone media-stream WebSocket. Additive: with LiveKit unconfigured
+# it accepts and immediately closes, so mounting it changes nothing about
+# the existing call flow.
+app.include_router(voice_router, prefix=API_V1_PREFIX)
 
 # -----------------------------------------------------------------------------
 # INFRASTRUCTURE / HEALTH ENDPOINTS
@@ -174,9 +197,9 @@ async def readiness_check() -> JSONResponse:
     is_ready = True
 
     # 1. Verify PostgreSQL Database Readiness
-    if engine is not None:
+    if db_session.engine is not None:
         try:
-            async with engine.connect() as conn:
+            async with db_session.engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
             db_status = "ready"
         except Exception as e:

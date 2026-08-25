@@ -155,3 +155,62 @@ async def test_accept_handoff_detects_accept_race_after_successful_bridge() -> N
         await service.accept_handoff(uuid4(), uuid4(), uuid4())
 
     assert exc_info.value.code == "SALES_HANDOFF_ACCEPT_RACE"
+
+
+# ---------------------------------------------------------------------------
+# Handoff REQUEST path + context bundle (deterministic foundation layer)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_request_handoff_delegates_to_repository_with_bundle() -> None:
+    """The request path goes through the service so every caller (AI tool,
+    future orchestrator) gets the context bundle attached."""
+    service = _service()
+    tenant_id = uuid4()
+    lead_id = uuid4()
+    customer_id = uuid4()
+    service.repository.create_sales_handoff = AsyncMock(
+        return_value={"id": uuid4(), "status": "requested"}
+    )
+
+    await service.request_handoff(
+        tenant_id, lead_id, customer_id, "Wants senior rep", 3, "note"
+    )
+
+    call = service.repository.create_sales_handoff.call_args
+    assert call.args[:3] == (tenant_id, lead_id, customer_id)
+    # conversation_summary stays None: phase 2's AI summarizer fills it.
+    assert call.kwargs["conversation_summary"] is None
+
+
+@pytest.mark.asyncio
+async def test_context_bundle_queries_are_all_tenant_scoped() -> None:
+    """Every query feeding the handoff briefing must filter on tenant_id --
+    a briefing that leaked another tenant's contact would be a data breach."""
+    from unittest.mock import MagicMock
+
+    from app.agent.repository import AgentRepository
+
+    session = AsyncMock()
+    res = MagicMock()
+    res.mappings.return_value.one_or_none.return_value = None
+    res.mappings.return_value.all.return_value = []
+    session.execute.return_value = res
+
+    repo = AgentRepository(session)
+    tenant_id = uuid4()
+
+    bundle = await repo.build_handoff_context_bundle(tenant_id, uuid4(), uuid4())
+
+    assert session.execute.await_count == 4
+    for call in session.execute.await_args_list:
+        assert call.args[1]["tenant_id"] == tenant_id
+
+    # Nothing model-generated in this phase.
+    assert bundle["context_snapshot"]["generated_by"] == "deterministic"
+    assert (
+        bundle["context_snapshot"]["conversation_summary_status"]
+        == "pending_phase_2_ai_summarizer"
+    )
+    assert bundle["prior_ai_actions"] is None

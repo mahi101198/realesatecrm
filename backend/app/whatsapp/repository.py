@@ -82,19 +82,26 @@ class WhatsAppRepository:
         template_variables: dict[str, Any],
         status: str,
         sent_at: datetime | None,
+        conversation_id: UUID | None = None,
     ) -> dict[str, Any]:
-        """Insert a new whatsapp_messages row (outbound send or inbound receive)."""
+        """Insert a new whatsapp_messages row (outbound send or inbound receive).
+
+        `conversation_id` is optional and nullable (migration 030): rows written
+        before conversations existed keep NULL, and any caller that has not been
+        wired to the conversation layer yet still works unchanged.
+        """
         result = await self.session.execute(
             text(
                 """
                 INSERT INTO public.whatsapp_messages (
-                    tenant_id, customer_id, lead_id, direction, provider_message_id,
-                    wa_id, phone_to, phone_from, message_type, content,
-                    template_variables, status, sent_at
+                    tenant_id, customer_id, lead_id, conversation_id, direction,
+                    provider_message_id, wa_id, phone_to, phone_from, message_type,
+                    content, template_variables, status, sent_at
                 ) VALUES (
-                    :tenant_id, :customer_id, :lead_id, :direction::public.message_direction,
+                    :tenant_id, :customer_id, :lead_id, :conversation_id,
+                    CAST(:direction AS public.message_direction),
                     :provider_message_id, :wa_id, :phone_to, :phone_from, :message_type,
-                    :content, :template_variables, :status::public.whatsapp_message_status,
+                    :content, :template_variables, CAST(:status AS public.whatsapp_message_status),
                     :sent_at
                 )
                 RETURNING *
@@ -104,6 +111,7 @@ class WhatsAppRepository:
                 "tenant_id": tenant_id,
                 "customer_id": customer_id,
                 "lead_id": lead_id,
+                "conversation_id": conversation_id,
                 "direction": direction,
                 "provider_message_id": provider_message_id,
                 "wa_id": wa_id,
@@ -138,7 +146,7 @@ class WhatsAppRepository:
             text(
                 """
                 UPDATE public.whatsapp_messages
-                SET status = :status::public.whatsapp_message_status,
+                SET status = CAST(:status AS public.whatsapp_message_status),
                     delivered_at = COALESCE(:delivered_at, delivered_at),
                     read_at = COALESCE(:read_at, read_at),
                     failed_at = COALESCE(:failed_at, failed_at),
@@ -162,37 +170,13 @@ class WhatsAppRepository:
         row = result.mappings().one_or_none()
         return dict(row) if row else None
 
-    async def find_customer_by_phone(self, tenant_id: UUID, phone: str) -> dict[str, Any] | None:
-        """Look up a customer by phone within a tenant (tenant is always
-        known here -- from RequestContext for outbound sends, from the
-        webhook URL path for inbound messages)."""
-        result = await self.session.execute(
-            text(
-                "SELECT * FROM public.customers "
-                "WHERE tenant_id = :tenant_id AND phone = :phone AND deleted_at IS NULL"
-            ),
-            {"tenant_id": tenant_id, "phone": phone},
-        )
-        row = result.mappings().one_or_none()
-        return dict(row) if row else None
-
-    async def create_minimal_customer(
-        self, tenant_id: UUID, phone: str, full_name: str
-    ) -> dict[str, Any]:
-        """Auto-create a customer for a first-contact inbound WhatsApp
-        sender with no existing CRM record. Only the required columns are
-        set; every other column takes its schema default."""
-        result = await self.session.execute(
-            text(
-                """
-                INSERT INTO public.customers (tenant_id, phone, full_name)
-                VALUES (:tenant_id, :phone, :full_name)
-                RETURNING *
-                """
-            ),
-            {"tenant_id": tenant_id, "phone": phone, "full_name": full_name},
-        )
-        return dict(result.mappings().one())
+    # NOTE: find_customer_by_phone / create_minimal_customer used to live here.
+    # They were one of three copies of the same find-or-create and have been
+    # replaced by the single tenant-scoped, race-safe path in
+    # app/customers/resolver.py::ContactResolver.resolve_contact.
+    # The old INSERT here had no ON CONFLICT clause, so two simultaneous
+    # first-contact messages from the same number raised a raw IntegrityError;
+    # the resolver does not.
 
     async def add_communication_log(
         self,
@@ -216,7 +200,8 @@ class WhatsAppRepository:
                     channel, direction, status, summary, initiated_by, initiated_by_id
                 ) VALUES (
                     :tenant_id, :customer_id, :lead_id, :whatsapp_message_id,
-                    'whatsapp'::public.communication_channel, :direction::public.message_direction,
+                    'whatsapp'::public.communication_channel,
+                    CAST(:direction AS public.message_direction),
                     :status, :summary, :initiated_by, :initiated_by_id
                 )
                 """
@@ -234,24 +219,9 @@ class WhatsAppRepository:
             },
         )
 
-    async def get_lead_for_customer(
-        self, tenant_id: UUID, customer_id: UUID
-    ) -> dict[str, Any] | None:
-        """Fetch the most recently created lead for a customer, if any."""
-        result = await self.session.execute(
-            text(
-                """
-                SELECT * FROM public.leads
-                WHERE tenant_id = :tenant_id AND customer_id = :customer_id
-                  AND deleted_at IS NULL
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ),
-            {"tenant_id": tenant_id, "customer_id": customer_id},
-        )
-        row = result.mappings().one_or_none()
-        return dict(row) if row else None
+    # NOTE: get_lead_for_customer used to live here. Lead resolution is now the
+    # single deterministic rule in app/leads/resolver.py::LeadResolver, which
+    # additionally excludes closed leads and opens one when none is active.
 
     async def update_template_status_by_provider_id(
         self, provider_template_id: str, status: str, rejection_reason: str | None
@@ -261,7 +231,7 @@ class WhatsAppRepository:
             text(
                 """
                 UPDATE public.whatsapp_templates
-                SET status = :status::public.whatsapp_template_status,
+                SET status = CAST(:status AS public.whatsapp_template_status),
                     rejection_reason = :rejection_reason,
                     updated_at = NOW()
                 WHERE provider_template_id = :provider_template_id
@@ -298,10 +268,14 @@ class WhatsAppRepository:
             where_conditions.append("lead_id = :filter_lead_id")
             params["filter_lead_id"] = filters.lead_id
         if filters.direction:
-            where_conditions.append("direction = :filter_direction::public.message_direction")
+            where_conditions.append(
+                "direction = CAST(:filter_direction AS public.message_direction)"
+            )
             params["filter_direction"] = filters.direction
         if filters.status:
-            where_conditions.append("status = :filter_status::public.whatsapp_message_status")
+            where_conditions.append(
+                "status = CAST(:filter_status AS public.whatsapp_message_status)"
+            )
             params["filter_status"] = filters.status
 
         where_str = " AND ".join(where_conditions)

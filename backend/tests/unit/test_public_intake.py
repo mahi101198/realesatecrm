@@ -59,23 +59,24 @@ async def test_resolve_tenant_id_never_trusts_client_supplied_tenant() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_enquiry_finds_existing_customer_by_phone_not_409(
+async def test_submit_enquiry_delegates_find_or_create_to_contact_resolver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify a returning phone number reuses the existing customer instead of
-    raising a duplicate-phone conflict (unlike CustomerService.create_customer)."""
+    """Verify the intake flow no longer carries its own find-or-create: it
+    delegates to the shared ContactResolver, passing the server-resolved
+    tenant_id and the submitted phone, with name/email/lead_source only as
+    CREATE-time defaults (email must NOT become a lookup key here)."""
     monkeypatch.setattr("app.public_intake.service.atomic", _noop_atomic)
     session = _session_stub()
     service = PublicIntakeService(session)
     tenant_id = uuid4()
     existing_customer_id = uuid4()
+    lead_source_id = uuid4()
 
-    service.repository.resolve_lead_source_id = AsyncMock(return_value=None)
-    service.repository.get_customer_by_phone = AsyncMock(
+    service.repository.resolve_lead_source_id = AsyncMock(return_value=lead_source_id)
+    service.contact_resolver.resolve_contact = AsyncMock(
         return_value={"id": existing_customer_id, "phone": "+919876543210"}
     )
-    create_customer_mock = AsyncMock()
-    service.repository.create_minimal_customer = create_customer_mock
     service.repository.create_minimal_lead = AsyncMock(
         return_value={"id": uuid4(), "lead_number": "LD-000042"}
     )
@@ -83,43 +84,22 @@ async def test_submit_enquiry_finds_existing_customer_by_phone_not_409(
     data = PublicLeadIntakeRequest(name="Rajesh Kumar", phone="9876543210")
     result = await service.submit_enquiry(tenant_id, data)
 
-    create_customer_mock.assert_not_called()
     assert result.reference == "LD-000042"
+    call = service.contact_resolver.resolve_contact.call_args
+    assert call.args[0] == tenant_id
+    assert call.kwargs["phone"] == "+919876543210"
+    assert "email" not in call.kwargs
+    assert call.kwargs["defaults"]["full_name"] == "Rajesh Kumar"
+    assert call.kwargs["defaults"]["lead_source_id"] == lead_source_id
 
 
 @pytest.mark.asyncio
-async def test_submit_enquiry_creates_new_customer_when_phone_unseen(
+async def test_submit_enquiry_creates_lead_against_resolved_customer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify a first-time phone number creates a new minimal customer record."""
-    monkeypatch.setattr("app.public_intake.service.atomic", _noop_atomic)
-    session = _session_stub()
-    service = PublicIntakeService(session)
-    tenant_id = uuid4()
-    new_customer_id = uuid4()
-
-    service.repository.resolve_lead_source_id = AsyncMock(return_value=None)
-    service.repository.get_customer_by_phone = AsyncMock(return_value=None)
-    service.repository.create_minimal_customer = AsyncMock(return_value={"id": new_customer_id})
-    service.repository.create_minimal_lead = AsyncMock(
-        return_value={"id": uuid4(), "lead_number": "LD-000043"}
-    )
-
-    data = PublicLeadIntakeRequest(name="New Enquirer", phone="9123456780")
-    result = await service.submit_enquiry(tenant_id, data)
-
-    service.repository.create_minimal_customer.assert_awaited_once()
-    assert result.reference == "LD-000043"
-
-
-@pytest.mark.asyncio
-async def test_submit_enquiry_survives_concurrent_create_customer_race(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify losing the create-customer race (ON CONFLICT DO NOTHING returns
-    None because a concurrent request's INSERT won first) does NOT surface as
-    an error -- the winning row is re-fetched and the flow continues normally,
-    still returning a lead reference to the visitor."""
+    """Verify the lead is always created against the id the resolver returned
+    -- including when the resolver had to re-fetch a concurrent request's
+    winning row -- never against a phantom id."""
     monkeypatch.setattr("app.public_intake.service.atomic", _noop_atomic)
     session = _session_stub()
     service = PublicIntakeService(session)
@@ -127,13 +107,9 @@ async def test_submit_enquiry_survives_concurrent_create_customer_race(
     winning_customer_id = uuid4()
 
     service.repository.resolve_lead_source_id = AsyncMock(return_value=None)
-    # First call (pre-check): nothing found. Second call (post-race re-fetch):
-    # the concurrent request's customer row is now visible.
-    service.repository.get_customer_by_phone = AsyncMock(
-        side_effect=[None, {"id": winning_customer_id, "phone": "+919123456790"}]
+    service.contact_resolver.resolve_contact = AsyncMock(
+        return_value={"id": winning_customer_id, "phone": "+919123456790"}
     )
-    # ON CONFLICT DO NOTHING: our own insert lost the race, so it returns None.
-    service.repository.create_minimal_customer = AsyncMock(return_value=None)
     service.repository.create_minimal_lead = AsyncMock(
         return_value={"id": uuid4(), "lead_number": "LD-000050"}
     )
@@ -141,36 +117,10 @@ async def test_submit_enquiry_survives_concurrent_create_customer_race(
     data = PublicLeadIntakeRequest(name="Racer", phone="9123456790")
     result = await service.submit_enquiry(tenant_id, data)
 
-    assert service.repository.get_customer_by_phone.await_count == 2
     assert result.reference == "LD-000050"
-    # The lead must be created against the WINNING customer's id, not a phantom.
     lead_call_kwargs = service.repository.create_minimal_lead.call_args.kwargs
     assert lead_call_kwargs["customer_id"] == winning_customer_id
-
-
-@pytest.mark.asyncio
-async def test_find_or_create_customer_raises_conflict_if_race_unresolvable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Verify the vanishingly-unlikely case (lost the race AND the re-fetch
-    also finds nothing, e.g. the winning row was soft-deleted in between)
-    raises a clean, typed ConflictError rather than proceeding with no
-    customer or leaking a raw None downstream."""
-    monkeypatch.setattr("app.public_intake.service.atomic", _noop_atomic)
-    session = _session_stub()
-    service = PublicIntakeService(session)
-    tenant_id = uuid4()
-
-    service.repository.get_customer_by_phone = AsyncMock(side_effect=[None, None])
-    service.repository.create_minimal_customer = AsyncMock(return_value=None)
-
-    data = PublicLeadIntakeRequest(name="Edge Case", phone="9123456791")
-
-    from app.core.exceptions import ConflictError
-
-    with pytest.raises(ConflictError) as exc_info:
-        await service._find_or_create_customer(tenant_id, data, None)
-    assert exc_info.value.code == "CUSTOMER_CREATE_CONFLICT"
+    assert lead_call_kwargs["tenant_id"] == tenant_id
 
 
 @pytest.mark.asyncio
@@ -184,7 +134,7 @@ async def test_submit_enquiry_ignores_malformed_property_id(
     tenant_id = uuid4()
 
     service.repository.resolve_lead_source_id = AsyncMock(return_value=None)
-    service.repository.get_customer_by_phone = AsyncMock(return_value={"id": uuid4()})
+    service.contact_resolver.resolve_contact = AsyncMock(return_value={"id": uuid4()})
     service.repository.create_minimal_lead = AsyncMock(
         return_value={"id": uuid4(), "lead_number": "LD-000044"}
     )

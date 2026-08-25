@@ -136,7 +136,7 @@ class UserAdminRepository:
         params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
 
         if status_filter:
-            where_conditions.append("status = :status::public.user_status")
+            where_conditions.append("status = CAST(:status AS public.user_status)")
             params["status"] = status_filter
         if query:
             where_conditions.append("(name ILIKE :search_q OR email ILIKE :search_q)")

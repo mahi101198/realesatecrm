@@ -2,7 +2,8 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
@@ -18,8 +19,15 @@ from app.agent.schemas import (
     AgentSalesContextSummary,
 )
 from app.core.exceptions import NotFoundError
+from app.events.model import EventType
+from app.events.publisher import publish_event
 
 logger = logging.getLogger(__name__)
+
+# How many recent activity rows are folded into a handoff's prior-AI-actions
+# digest. Small on purpose: this is a briefing for a human about to pick up the
+# phone, not an audit export (the full trail stays in public.activities).
+_HANDOFF_PRIOR_ACTIONS_LIMIT = 10
 
 # Columns updatable via update_lead_requirements_with_history — must stay an
 # explicit allowlist since field names are interpolated into the UPDATE SQL.
@@ -40,7 +48,8 @@ _LEAD_REQUIREMENT_FIELDS = frozenset(
 
 
 class AgentRepository:
-    """Repository handling queries for agent contexts, observations, call jobs, and CRM intelligence."""
+    """Repository handling queries for agent contexts, observations, call
+    jobs, and CRM intelligence."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -48,7 +57,8 @@ class AgentRepository:
     async def verify_lead_and_customer_tenant(
         self, tenant_id: UUID, lead_id: UUID, customer_id: UUID | None = None
     ) -> None:
-        """Verify that lead (and optional customer) belong to tenant_id, raising NotFoundError if not."""
+        """Verify that lead (and optional customer) belong to tenant_id,
+        raising NotFoundError if not."""
         sql = text(
             """
             SELECT l.id
@@ -57,7 +67,14 @@ class AgentRepository:
             WHERE l.id = :lead_id
               AND l.tenant_id = :tenant_id
               AND l.deleted_at IS NULL
-              AND (:customer_id::uuid IS NULL OR c.id = :customer_id)
+              -- CAST(x AS uuid), not a trailing double-colon cast: the same
+              -- bind name reused with an adjacent cast on only one occurrence
+              -- breaks asyncpg's positional-parameter numbering (SQLAlchemy
+              -- silently leaves one occurrence as literal text) -- found
+              -- live-testing against a real database, where it surfaces as a
+              -- raw syntax error. Do not write the shorthand cast syntax in
+              -- this comment either -- it would confuse the same scanner.
+              AND (CAST(:customer_id AS uuid) IS NULL OR c.id = CAST(:customer_id AS uuid))
             """
         )
         res = await self.session.execute(
@@ -117,7 +134,7 @@ class AgentRepository:
             LEFT JOIN public.users u ON sa.user_id = u.id
             WHERE l.id = :lead_id
               AND l.deleted_at IS NULL
-              AND (:tenant_id::uuid IS NULL OR l.tenant_id = :tenant_id)
+              AND (CAST(:tenant_id AS uuid) IS NULL OR l.tenant_id = CAST(:tenant_id AS uuid))
             """
         )
         res = await self.session.execute(lead_query, {"lead_id": lead_id, "tenant_id": tenant_id})
@@ -303,7 +320,8 @@ class AgentRepository:
     async def claim_job_for_update(
         self, tenant_id: UUID, call_job_id: UUID
     ) -> dict[str, Any] | None:
-        """Lock call job row exclusively using FOR UPDATE SKIP LOCKED to prevent double worker claiming."""
+        """Lock call job row exclusively using FOR UPDATE SKIP LOCKED to
+        prevent double worker claiming."""
         sql = text(
             """
             SELECT * FROM public.call_jobs
@@ -412,14 +430,15 @@ class AgentRepository:
     async def find_and_reconcile_stuck_jobs(
         self, tenant_id: UUID | None = None, timeout_minutes: int = 15
     ) -> list[dict[str, Any]]:
-        """Find jobs stuck in 'preparing', 'ready', or 'calling' beyond timeout and transition to retry_pending/failed."""
+        """Find jobs stuck in 'preparing', 'ready', or 'calling' beyond
+        timeout and transition to retry_pending/failed."""
         stuck_query = text(
             """
             SELECT id, tenant_id, lead_id, customer_id, status, attempt_count, max_attempts
             FROM public.call_jobs
             WHERE status IN ('preparing', 'ready', 'calling')
               AND updated_at < (NOW() - INTERVAL '1 minute' * :timeout_minutes)
-              AND (:tenant_id::uuid IS NULL OR tenant_id = :tenant_id)
+              AND (CAST(:tenant_id AS uuid) IS NULL OR tenant_id = CAST(:tenant_id AS uuid))
             FOR UPDATE SKIP LOCKED
             """
         )
@@ -439,7 +458,7 @@ class AgentRepository:
             upd_sql = text(
                 """
                 UPDATE public.call_jobs
-                SET status = :new_status::public.call_job_status,
+                SET status = CAST(:new_status AS public.call_job_status),
                     last_error_code = 'STUCK_JOB_TIMEOUT',
                     last_error_message = 'Job timed out in active state and was reconciled.',
                     updated_at = NOW()
@@ -462,10 +481,12 @@ class AgentRepository:
         updates: dict[str, Any],
         source_call_attempt_id: UUID | None = None,
     ) -> dict[str, Any]:
-        """Update structured requirements on lead and log exact diffs in lead_requirement_history."""
+        """Update structured requirements on lead and log exact diffs in
+        lead_requirement_history."""
         fetch_query = text(
             """
-            SELECT budget_min, budget_max, area_min, area_max, bedrooms, purpose, timeline, finance_requirement, preferred_city, preferred_locality
+            SELECT budget_min, budget_max, area_min, area_max, bedrooms, purpose,
+                   timeline, finance_requirement, preferred_city, preferred_locality
             FROM public.leads
             WHERE id = :lead_id AND tenant_id = :tenant_id
             """
@@ -516,9 +537,11 @@ class AgentRepository:
                 hist_sql = text(
                     """
                     INSERT INTO public.lead_requirement_history (
-                        tenant_id, lead_id, field_name, old_value, new_value, source, source_call_attempt_id
+                        tenant_id, lead_id, field_name, old_value, new_value,
+                        source, source_call_attempt_id
                     ) VALUES (
-                        :tenant_id, :lead_id, :field_name, :old_value, :new_value, :source, :source_call_attempt_id
+                        :tenant_id, :lead_id, :field_name, :old_value, :new_value,
+                        :source, :source_call_attempt_id
                     )
                     """
                 )
@@ -547,9 +570,11 @@ class AgentRepository:
         sql = text(
             """
             INSERT INTO public.lead_observations (
-                tenant_id, lead_id, customer_id, observation_type, observation_value, confidence, source, source_call_attempt_id
+                tenant_id, lead_id, customer_id, observation_type, observation_value,
+                confidence, source, source_call_attempt_id
             ) VALUES (
-                :tenant_id, :lead_id, :customer_id, :observation_type, :observation_value, :confidence, 'ai_call', :source_call_attempt_id
+                :tenant_id, :lead_id, :customer_id, :observation_type, :observation_value,
+                :confidence, 'ai_call', :source_call_attempt_id
             )
             RETURNING *
             """
@@ -601,7 +626,8 @@ class AgentRepository:
             upd_sql = text(
                 """
                 UPDATE public.lead_follow_ups
-                SET scheduled_at = :scheduled_at, reason = COALESCE(:reason, reason), notes = COALESCE(:notes, notes), updated_at = NOW()
+                SET scheduled_at = :scheduled_at, reason = COALESCE(:reason, reason),
+                    notes = COALESCE(:notes, notes), updated_at = NOW()
                 WHERE id = :id
                 RETURNING *
                 """
@@ -620,9 +646,11 @@ class AgentRepository:
         sql = text(
             """
             INSERT INTO public.lead_follow_ups (
-                tenant_id, lead_id, customer_id, follow_up_type, status, reason, scheduled_at, notes, source
+                tenant_id, lead_id, customer_id, follow_up_type, status, reason,
+                scheduled_at, notes, source
             ) VALUES (
-                :tenant_id, :lead_id, :customer_id, :follow_up_type, 'scheduled', :reason, :scheduled_at, :notes, 'ai_agent'
+                :tenant_id, :lead_id, :customer_id, :follow_up_type, 'scheduled', :reason,
+                :scheduled_at, :notes, 'ai_agent'
             )
             RETURNING *
             """
@@ -674,7 +702,8 @@ class AgentRepository:
         sql = text(
             """
             UPDATE public.lead_follow_ups
-            SET scheduled_at = :scheduled_at, reason = COALESCE(:reason, reason), status = 'scheduled', updated_at = NOW()
+            SET scheduled_at = :scheduled_at, reason = COALESCE(:reason, reason),
+                status = 'scheduled', updated_at = NOW()
             WHERE id = :follow_up_id AND tenant_id = :tenant_id
             RETURNING *
             """
@@ -700,7 +729,8 @@ class AgentRepository:
         sql = text(
             """
             UPDATE public.lead_follow_ups
-            SET status = 'cancelled', cancelled_at = NOW(), cancel_reason = :cancel_reason, updated_at = NOW()
+            SET status = 'cancelled', cancelled_at = NOW(),
+                cancel_reason = :cancel_reason, updated_at = NOW()
             WHERE id = :follow_up_id AND tenant_id = :tenant_id
             RETURNING *
             """
@@ -721,11 +751,15 @@ class AgentRepository:
         cancel_jobs_sql = text(
             """
             UPDATE public.call_jobs
-            SET status = 'cancelled', last_error_code = 'FOLLOW_UP_CANCELLED', last_error_message = 'Associated follow-up was cancelled.', updated_at = NOW()
-            WHERE lead_id = :lead_id AND tenant_id = :tenant_id AND status IN ('queued', 'scheduled', 'preparing', 'ready', 'retry_pending')
+            SET status = 'cancelled', last_error_code = 'FOLLOW_UP_CANCELLED',
+                last_error_message = 'Associated follow-up was cancelled.', updated_at = NOW()
+            WHERE lead_id = :lead_id AND tenant_id = :tenant_id
+              AND status IN ('queued', 'scheduled', 'preparing', 'ready', 'retry_pending')
             """
         )
-        await self.session.execute(cancel_jobs_sql, {"lead_id": row["lead_id"], "tenant_id": tenant_id})
+        await self.session.execute(
+            cancel_jobs_sql, {"lead_id": row["lead_id"], "tenant_id": tenant_id}
+        )
 
         return dict(row)
 
@@ -741,15 +775,34 @@ class AgentRepository:
         reason: str | None = None,
         priority: int = 5,
         notes: str | None = None,
+        conversation_summary: str | None = None,
     ) -> dict[str, Any]:
-        """Request a human sales agent transfer/handoff."""
+        """Request a human sales agent transfer/handoff, WITH the context
+        bundle the receiving human needs (migration 032).
+
+        REAL NOW: `context_snapshot` (contact + current lead facts) and
+        `prior_ai_actions` (recent activities digest) are built here,
+        deterministically, from tenant-scoped rows.
+
+        PLACEHOLDER: `conversation_summary` stays NULL unless a caller supplies
+        one. Phase 2's AI summarizer is expected to fill it; nothing in this
+        phase generates natural-language summaries.
+
+        `reason` (why the transfer was requested) already existed and is
+        unchanged -- it is the free-text reason the AI/staff gave.
+        """
         await self.verify_lead_and_customer_tenant(tenant_id, lead_id, customer_id)
+
+        bundle = await self.build_handoff_context_bundle(tenant_id, lead_id, customer_id)
+
         sql = text(
             """
             INSERT INTO public.sales_handoffs (
-                tenant_id, lead_id, customer_id, reason, priority, status, notes
+                tenant_id, lead_id, customer_id, reason, priority, status, notes,
+                context_snapshot, prior_ai_actions, conversation_summary
             ) VALUES (
-                :tenant_id, :lead_id, :customer_id, :reason, :priority, 'requested', :notes
+                :tenant_id, :lead_id, :customer_id, :reason, :priority, 'requested', :notes,
+                :context_snapshot, :prior_ai_actions, :conversation_summary
             )
             RETURNING *
             """
@@ -763,9 +816,118 @@ class AgentRepository:
                 "reason": reason,
                 "priority": priority,
                 "notes": notes,
+                # asyncpg's jsonb codec expects an already-serialized string,
+                # not a dict -- a raw dict raises DataError on every real
+                # insert (mocked tests never catch this, since they never
+                # serialize parameters).
+                "context_snapshot": json.dumps(bundle["context_snapshot"], default=str),
+                "prior_ai_actions": bundle["prior_ai_actions"],
+                "conversation_summary": conversation_summary,
             },
         )
-        return dict(res.mappings().one())
+        row = dict(res.mappings().one())
+
+        await publish_event(
+            self.session,
+            tenant_id=tenant_id,
+            event_type=EventType.HUMAN_HANDOFF_REQUESTED,
+            contact_id=customer_id,
+            lead_id=lead_id,
+            payload={
+                "handoff_id": str(row["id"]),
+                "reason": reason,
+                "priority": priority,
+            },
+        )
+        return row
+
+    async def build_handoff_context_bundle(
+        self, tenant_id: UUID, lead_id: UUID, customer_id: UUID
+    ) -> dict[str, Any]:
+        """Assemble the deterministic briefing stored on a sales_handoff.
+
+        Every query below is tenant-scoped. Returns
+        `{"context_snapshot": dict, "prior_ai_actions": str | None}`.
+
+        Nothing here is generated, inferred or summarized by a model: it is a
+        straight read of the contact row, the current lead row, and the recent
+        `activities` audit trail the AI tool dispatcher already writes.
+        """
+        contact_res = await self.session.execute(
+            text(
+                """
+                SELECT full_name, phone, email, city, preferred_language,
+                       preferred_contact_time, do_not_call, do_not_whatsapp
+                FROM public.customers
+                WHERE id = :customer_id AND tenant_id = :tenant_id AND deleted_at IS NULL
+                """
+            ),
+            {"customer_id": customer_id, "tenant_id": tenant_id},
+        )
+        contact_row = contact_res.mappings().one_or_none()
+
+        lead_res = await self.session.execute(
+            text(
+                """
+                SELECT lead_number, status, sales_stage, lead_score, interest_level,
+                       purpose, budget_min, budget_max, bedrooms, preferred_city,
+                       preferred_locality, timeline, finance_requirement,
+                       last_contacted_at, next_follow_up_at
+                FROM public.leads
+                WHERE id = :lead_id AND tenant_id = :tenant_id AND deleted_at IS NULL
+                """
+            ),
+            {"lead_id": lead_id, "tenant_id": tenant_id},
+        )
+        lead_row = lead_res.mappings().one_or_none()
+
+        interests_res = await self.session.execute(
+            text(
+                """
+                SELECT p.name AS project_name, lpi.interest_level::text AS interest_level
+                FROM public.lead_property_interests lpi
+                LEFT JOIN public.projects p ON p.id = lpi.project_id
+                WHERE lpi.tenant_id = :tenant_id AND lpi.lead_id = :lead_id
+                ORDER BY lpi.is_primary DESC, lpi.created_at DESC
+                LIMIT 5
+                """
+            ),
+            {"tenant_id": tenant_id, "lead_id": lead_id},
+        )
+        interests = [dict(r) for r in interests_res.mappings().all()]
+
+        activities_res = await self.session.execute(
+            text(
+                """
+                SELECT activity_type, description, created_at
+                FROM public.activities
+                WHERE tenant_id = :tenant_id AND lead_id = :lead_id
+                ORDER BY created_at DESC
+                LIMIT :limit
+                """
+            ),
+            {"tenant_id": tenant_id, "lead_id": lead_id, "limit": _HANDOFF_PRIOR_ACTIONS_LIMIT},
+        )
+        activity_rows = [dict(r) for r in activities_res.mappings().all()]
+
+        prior_ai_actions = (
+            "\n".join(
+                f"{a['created_at'].isoformat() if a.get('created_at') else '?'} "
+                f"[{a.get('activity_type')}] {a.get('description') or ''}".strip()
+                for a in activity_rows
+            )
+            or None
+        )
+
+        context_snapshot: dict[str, Any] = {
+            "schema_version": 1,
+            "generated_by": "deterministic",
+            "contact": _jsonable(contact_row),
+            "lead": _jsonable(lead_row),
+            "property_interests": [_jsonable(i) for i in interests],
+            "conversation_summary_status": "pending_phase_2_ai_summarizer",
+        }
+        return {"context_snapshot": context_snapshot, "prior_ai_actions": prior_ai_actions}
 
     # ---------------------------------------------------------------------------
     # DO-NOT-CALL & CONTACT PREFERENCES
@@ -838,3 +1000,31 @@ class AgentRepository:
         )
         row = res.mappings().one_or_none()
         return dict(row) if row else None
+
+
+def _jsonable(row: Any) -> dict[str, Any] | None:
+    """Convert a DB row mapping into a JSONB-safe dict.
+
+    `sales_handoffs.context_snapshot` is jsonb, so Decimal/UUID/date values
+    that come back from Postgres must be stringified first. Defensive by
+    design: a handoff must never fail to be created because one field in the
+    briefing could not be serialized.
+    """
+    if row is None:
+        return None
+    try:
+        items = dict(row).items()
+    except (TypeError, ValueError):
+        return None
+
+    out: dict[str, Any] = {}
+    for key, value in items:
+        if value is None or isinstance(value, bool | int | float | str):
+            out[key] = value
+        elif isinstance(value, datetime | date):
+            out[key] = value.isoformat()
+        elif isinstance(value, Decimal):
+            out[key] = float(value)
+        else:
+            out[key] = str(value)
+    return out

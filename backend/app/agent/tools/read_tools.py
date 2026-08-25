@@ -71,7 +71,7 @@ async def get_recent_call_summary_tool(
             SELECT c.id, c.status, c.outcome, c.call_summary, c.ended_at, c.duration_seconds
             FROM public.calls c
             WHERE c.lead_id = :lead_id
-              AND (:tenant_id::uuid IS NULL OR c.tenant_id = :tenant_id)
+              AND (CAST(:tenant_id AS uuid) IS NULL OR c.tenant_id = CAST(:tenant_id AS uuid))
             ORDER BY c.created_at DESC
             LIMIT 1
             """
@@ -79,7 +79,9 @@ async def get_recent_call_summary_tool(
         res = await session.execute(sql, {"lead_id": lead_id, "tenant_id": tenant_id})
         row = res.mappings().one_or_none()
         if not row:
-            return _success_response({"has_previous_call": False, "summary": "No previous call found."})
+            return _success_response(
+                {"has_previous_call": False, "summary": "No previous call found."}
+            )
 
         # Fetch observations from last call
         obs_sql = text(
@@ -92,7 +94,9 @@ async def get_recent_call_summary_tool(
             """
         )
         obs_res = await session.execute(obs_sql, {"lead_id": lead_id})
-        observations = [f"{r['observation_type']}: {r['observation_value']}" for r in obs_res.mappings().all()]
+        observations = [
+            f"{r['observation_type']}: {r['observation_value']}" for r in obs_res.mappings().all()
+        ]
 
         return _success_response(
             {
@@ -151,7 +155,11 @@ async def search_properties_tool(
     budget_max: Decimal | float | None = None,
     bedrooms: int | None = None,
     project_id: UUID | None = None,
-    location: str | None = None,
+    location: str | None = None,  # noqa: ARG001 -- accepted for API-caller
+    # compatibility; PropertySearchFilter has no location/city/locality field
+    # to bind it to (see migration 023: no locations table yet, city/locality
+    # stay free text on projects), and the LLM-facing schema in
+    # agents/whatsapp_agent/prompts.py never sends this argument.
     limit: int = 5,
 ) -> dict[str, Any]:
     """AI Tool: Search available properties matching customer requirements."""

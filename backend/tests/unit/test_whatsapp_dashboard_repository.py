@@ -54,34 +54,6 @@ async def test_find_customer_returns_none_on_ambiguous_matches() -> None:
 
     assert await repo.find_customer_by_phone_cross_tenant("+919999999999") is None
 
-
-@pytest.mark.asyncio
-async def test_get_or_create_lead_returns_existing_lead() -> None:
-    mock_session = AsyncMock()
-    select_res = MagicMock()
-    lead_id = uuid4()
-    select_res.mappings.return_value.one_or_none.return_value = {"id": lead_id}
-    mock_session.execute.return_value = select_res
-    repo = CallAgentTriggerRepository(mock_session)
-
-    result = await repo.get_or_create_lead(uuid4(), uuid4())
-
-    assert result["id"] == lead_id
-    assert mock_session.execute.call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_get_or_create_lead_creates_minimal_lead_when_none_exists() -> None:
-    mock_session = AsyncMock()
-    select_res = MagicMock()
-    select_res.mappings.return_value.one_or_none.return_value = None
-    insert_res = MagicMock()
-    new_lead_id = uuid4()
-    insert_res.mappings.return_value.one.return_value = {"id": new_lead_id}
-    mock_session.execute.side_effect = [select_res, insert_res]
-    repo = CallAgentTriggerRepository(mock_session)
-
-    result = await repo.get_or_create_lead(uuid4(), uuid4())
-
-    assert result["id"] == new_lead_id
-    assert mock_session.execute.call_count == 2
+# NOTE: the get_or_create_lead tests that used to live here moved to
+# tests/unit/test_lead_resolver.py -- lead resolution is no longer this
+# repository's job, it is the single shared rule in app/leads/resolver.py.

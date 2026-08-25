@@ -31,7 +31,7 @@ class FollowUpRepository:
                 assigned_sales_agent_id, created_by, metadata
             ) VALUES (
                 :tenant_id, :lead_id, :customer_id, :related_call_id,
-                :follow_up_type::public.follow_up_type, :scheduled_at,
+                CAST(:follow_up_type AS public.follow_up_type), :scheduled_at,
                 'pending'::public.follow_up_status,
                 :reason, :notes, :assigned_sales_agent_id, :created_by, :metadata
             )
@@ -185,11 +185,11 @@ class FollowUpRepository:
             params["filter_agent_id"] = filters.assigned_sales_agent_id
 
         if filters.status:
-            where_conditions.append("status = :filter_status::public.follow_up_status")
+            where_conditions.append("status = CAST(:filter_status AS public.follow_up_status)")
             params["filter_status"] = filters.status
 
         if filters.follow_up_type:
-            where_conditions.append("follow_up_type = :filter_type::public.follow_up_type")
+            where_conditions.append("follow_up_type = CAST(:filter_type AS public.follow_up_type)")
             params["filter_type"] = filters.follow_up_type
 
         if filters.scheduled_before:

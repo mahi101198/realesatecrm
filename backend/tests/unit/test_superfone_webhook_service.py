@@ -1,7 +1,8 @@
 """Unit tests for SuperfoneWebhookService: idempotency, SFVoPI call
 correlation (call_uuid/request_uuid normalization), and CRM CDR event
-handling (including the documented tenant-resolution limitation for
-first-time/unmatched CDR events)."""
+handling (including the documented customer-resolution limitation for
+first-time/unmatched CDR events -- tenant_id is now known, per migration
+033/superfone_crm_tenant_configs, but customer_id still isn't)."""
 
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -57,6 +58,35 @@ async def test_record_event_returns_false_for_duplicate_delivery() -> None:
         payload={"call_uuid": "call123"},
     )
     assert is_new is False
+
+
+@pytest.mark.asyncio
+async def test_record_event_names_the_partial_index_predicate() -> None:
+    """Regression: the ON CONFLICT target MUST repeat
+    `WHERE external_event_id IS NOT NULL`.
+
+    Migration 016 replaced the plain unique constraint on
+    (provider, external_event_id) with a PARTIAL unique index carrying that
+    predicate. Without repeating it, Postgres cannot infer the index as an
+    arbiter and raises 42P10 -- which would make every Superfone delivery
+    fail outright instead of deduplicating. Kept identical to the (already
+    correct) WhatsAppWebhookService._record_event."""
+    service, session = _service()
+    result = MagicMock()
+    result.mappings.return_value.one_or_none.return_value = {"id": uuid4()}
+    session.execute.return_value = result
+
+    await service._record_event(
+        tenant_id=None,
+        provider="superfone_sfvopi",
+        event_type="answer",
+        external_event_id="call123:answer",
+        payload={},
+    )
+
+    sql = str(session.execute.await_args.args[0])
+    assert "ON CONFLICT (provider, external_event_id)" in sql
+    assert "WHERE external_event_id IS NOT NULL" in sql
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +192,7 @@ async def test_handle_crm_event_ignores_competing_event_types() -> None:
     service._record_event = AsyncMock(return_value=True)  # type: ignore[method-assign]
     service._mark_event_processed = AsyncMock()  # type: ignore[method-assign]
 
-    await service.handle_crm_event("CUSTOMER_CREATE", {"cdr_uuid": "cdr1"})
+    await service.handle_crm_event(uuid4(), "CUSTOMER_CREATE", {"cdr_uuid": "cdr1"})
     service._mark_event_processed.assert_awaited_once()
     # No calls-table mutation attempted for an ignored event type.
     session.execute.assert_not_called()
@@ -171,13 +201,14 @@ async def test_handle_crm_event_ignores_competing_event_types() -> None:
 @pytest.mark.asyncio
 async def test_upsert_crm_call_is_a_noop_when_unmatched() -> None:
     """Verify the documented limitation: a cold CDR event (no pre-existing
-    calls row correlated by cdr_uuid) is NOT force-inserted with a guessed
-    tenant_id, since calls.tenant_id/customer_id are both NOT NULL and must
-    never be fabricated. It's recorded in webhook_events only."""
+    calls row correlated by cdr_uuid, scoped to this tenant) is NOT
+    force-inserted with a guessed customer_id, since calls.customer_id is
+    NOT NULL and must never be fabricated. It's recorded in webhook_events
+    only."""
     service, session = _service()
     service._get_calls_row_by_cdr_uuid = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
-    await service._upsert_crm_call("ALL_CALLS", "cdr-unmatched", {"cdr_duration": 42})
+    await service._upsert_crm_call(uuid4(), "ALL_CALLS", "cdr-unmatched", {"cdr_duration": 42})
 
     session.execute.assert_not_called()
 
@@ -191,7 +222,7 @@ async def test_upsert_crm_call_updates_existing_matched_row() -> None:
         return_value={"id": call_id, "tenant_id": uuid4(), "metadata": {}}
     )
 
-    await service._upsert_crm_call("MISSED_CALL", "cdr-matched", {"cdr_duration": 0})
+    await service._upsert_crm_call(uuid4(), "MISSED_CALL", "cdr-matched", {"cdr_duration": 0})
 
     session.execute.assert_awaited_once()
 
@@ -202,7 +233,9 @@ async def test_apply_crm_recording_noop_when_unmatched() -> None:
     service, session = _service()
     service._get_calls_row_by_cdr_uuid = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
-    await service._apply_crm_recording("cdr-unmatched", {"cdr_recording_url": "https://s3/x"})
+    await service._apply_crm_recording(
+        uuid4(), "cdr-unmatched", {"cdr_recording_url": "https://s3/x"}
+    )
     session.execute.assert_not_called()
 
 
@@ -217,7 +250,9 @@ async def test_apply_crm_recording_stores_url_with_expiry_metadata() -> None:
     )
 
     await service._apply_crm_recording(
-        "cdr-matched", {"cdr_recording_url": "https://s3/x", "cdr_recording_status": "ready"}
+        uuid4(),
+        "cdr-matched",
+        {"cdr_recording_url": "https://s3/x", "cdr_recording_status": "ready"},
     )
 
     session.execute.assert_awaited_once()
@@ -233,5 +268,5 @@ async def test_apply_crm_summary_noop_when_unmatched() -> None:
     service, session = _service()
     service._get_calls_row_by_cdr_uuid = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
-    await service._apply_crm_summary("cdr-unmatched", {"summary_text": "great call"})
+    await service._apply_crm_summary(uuid4(), "cdr-unmatched", {"summary_text": "great call"})
     session.execute.assert_not_called()

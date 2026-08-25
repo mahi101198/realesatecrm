@@ -16,9 +16,11 @@ public.webhook_events first, keyed for idempotency on (provider,
 external_event_id) -- see uq_webhook_events_provider_external_notnull.
 """
 
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlencode
 from uuid import UUID
 
 from sqlalchemy import text
@@ -59,7 +61,15 @@ class SuperfoneWebhookService:
         payload: dict[str, Any],
     ) -> bool:
         """Persist the raw delivery. Returns True if this is a NEW event
-        (should be processed), False if it's a duplicate delivery (no-op)."""
+        (should be processed), False if it's a duplicate delivery (no-op).
+
+        The WHERE clause mirrors the predicate of the partial unique index
+        uq_webhook_events_provider_external_notnull (see migration 016) --
+        without it Postgres cannot infer a partial index as the ON CONFLICT
+        arbiter and raises 42P10, which would make EVERY delivery on this
+        stream fail rather than deduplicate. Kept identical to
+        WhatsAppWebhookService._record_event.
+        """
         result = await self.session.execute(
             text(
                 """
@@ -70,7 +80,9 @@ class SuperfoneWebhookService:
                     :tenant_id, :provider, :event_type, :external_event_id,
                     :payload, 'received'::public.webhook_status
                 )
-                ON CONFLICT (provider, external_event_id) DO NOTHING
+                ON CONFLICT (provider, external_event_id)
+                    WHERE external_event_id IS NOT NULL
+                    DO NOTHING
                 RETURNING id
                 """
             ),
@@ -79,7 +91,12 @@ class SuperfoneWebhookService:
                 "provider": provider,
                 "event_type": event_type,
                 "external_event_id": external_event_id,
-                "payload": payload,
+                # asyncpg's jsonb codec expects an already-serialized string,
+                # not a dict -- a raw dict raises DataError on every real
+                # insert (mocked tests never catch this: they never serialize
+                # parameters). Pre-existing bug, found live-testing the voice
+                # pipeline against a real database for the first time.
+                "payload": json.dumps(payload, default=str),
             },
         )
         inserted = result.mappings().one_or_none()
@@ -98,7 +115,7 @@ class SuperfoneWebhookService:
             text(
                 """
                 UPDATE public.webhook_events
-                SET processing_status = :status::public.webhook_status,
+                SET processing_status = CAST(:status AS public.webhook_status),
                     processed_at = NOW(),
                     error_message = :error
                 WHERE provider = :provider AND external_event_id = :external_event_id
@@ -116,12 +133,29 @@ class SuperfoneWebhookService:
     # SFVoPI: answer / ring / hangup
     # ------------------------------------------------------------------
 
-    def build_stream_response(self) -> StreamResponse:
+    def build_stream_response(self, payload: dict[str, Any] | None = None) -> StreamResponse:
         """Build the Stream JSON response -- pure, no DB access, so the
-        answer handler can return it even if webhook bookkeeping fails."""
+        answer handler can return it even if webhook bookkeeping fails.
+
+        The configured URL is a single static value, so on its own it cannot
+        tell the media-stream endpoint WHICH call is arriving. When the answer
+        payload is available we append `call=<request_uuid|call_uuid>` -- the
+        same identifier `AgentGateway._place_sfvopi_call` stored in
+        `calls.provider_call_id` -- so `app/voice/router.py` can correlate the
+        socket back to a call job without a side channel. `payload` stays
+        optional so the pure no-argument form still works.
+        """
+        url = settings.VOICE_AGENT_STREAM_URL
+        correlation = None
+        if payload:
+            correlation = payload.get("request_uuid") or payload.get("call_uuid")
+        if url and correlation:
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}{urlencode({'call': str(correlation)})}"
+
         return StreamResponse(
             stream=StreamConfig(
-                url=settings.VOICE_AGENT_STREAM_URL,
+                url=url,
                 codec=settings.VOICE_AGENT_STREAM_CODEC,
                 sample_rate=settings.VOICE_AGENT_STREAM_SAMPLE_RATE,
                 direction="BOTH",
@@ -281,7 +315,7 @@ class SuperfoneWebhookService:
                     """
                     UPDATE public.calls
                     SET provider_call_id = :call_uuid,
-                        metadata = metadata || :meta_fragment::jsonb,
+                        metadata = metadata || CAST(:meta_fragment AS jsonb),
                         updated_at = NOW()
                     WHERE id = :id
                     """
@@ -299,13 +333,18 @@ class SuperfoneWebhookService:
     # CRM event notifications (CDR lifecycle)
     # ------------------------------------------------------------------
 
-    async def handle_crm_event(self, event_type: str, payload: dict[str, Any]) -> None:
-        """Persist + process a CRM event-notification delivery."""
+    async def handle_crm_event(
+        self, tenant_id: UUID, event_type: str, payload: dict[str, Any]
+    ) -> None:
+        """Persist + process a CRM event-notification delivery. `tenant_id`
+        comes from the URL path (see router.py), verified against this
+        tenant's own bearer secret before this is ever called -- it is
+        never guessed or inferred from the payload."""
         cdr_uuid = payload.get("cdr_uuid")
         external_id = f"{cdr_uuid or 'unknown'}:{event_type}"
 
         is_new = await self._record_event(
-            tenant_id=None,
+            tenant_id=tenant_id,
             provider=_CRM_PROVIDER,
             event_type=event_type,
             external_event_id=external_id,
@@ -316,11 +355,11 @@ class SuperfoneWebhookService:
 
         try:
             if event_type in ("ALL_CALLS", "MISSED_CALL"):
-                await self._upsert_crm_call(event_type, cdr_uuid, payload)
+                await self._upsert_crm_call(tenant_id, event_type, cdr_uuid, payload)
             elif event_type == "CDR_RECORDING_AVAILABLE":
-                await self._apply_crm_recording(cdr_uuid, payload)
+                await self._apply_crm_recording(tenant_id, cdr_uuid, payload)
             elif event_type == "CDR_SUMMARY_READY":
-                await self._apply_crm_summary(cdr_uuid, payload)
+                await self._apply_crm_summary(tenant_id, cdr_uuid, payload)
             else:
                 logger.info(f"Ignoring unhandled/competing CRM event type '{event_type}'.")
             await self._mark_event_processed(_CRM_PROVIDER, external_id)
@@ -332,7 +371,9 @@ class SuperfoneWebhookService:
             # here (after logging) avoids turning a downstream data-mapping
             # bug into a 5xx that teaches Superfone nothing useful.
 
-    async def _get_calls_row_by_cdr_uuid(self, cdr_uuid: str | None) -> dict[str, Any] | None:
+    async def _get_calls_row_by_cdr_uuid(
+        self, tenant_id: UUID, cdr_uuid: str | None
+    ) -> dict[str, Any] | None:
         if not cdr_uuid:
             return None
         result = await self.session.execute(
@@ -340,37 +381,35 @@ class SuperfoneWebhookService:
                 """
                 SELECT id, tenant_id, metadata FROM public.calls
                 WHERE provider = :provider AND provider_call_id = :cdr_uuid
+                  AND tenant_id = :tenant_id
                 """
             ),
-            {"provider": _CRM_PROVIDER, "cdr_uuid": cdr_uuid},
+            {"provider": _CRM_PROVIDER, "cdr_uuid": cdr_uuid, "tenant_id": tenant_id},
         )
         row = result.mappings().one_or_none()
         return dict(row) if row else None
 
     async def _upsert_crm_call(
-        self, event_type: str, cdr_uuid: str | None, payload: dict[str, Any]
+        self, tenant_id: UUID, event_type: str, cdr_uuid: str | None, payload: dict[str, Any]
     ) -> None:
         """Update the `calls` row for a finalized human call CDR, if one is
-        already correlated by cdr_uuid.
+        already correlated by cdr_uuid for this tenant.
 
-        IMPORTANT LIMITATION (see report): `calls.tenant_id` and
-        `calls.customer_id` are both NOT NULL, so a `calls` row can only
-        ever be created with a real, known tenant/customer -- never with a
-        guessed or NULL value (that would violate tenant isolation, system.md
-        rule #30/#87). Nothing in this integration pass learns cdr_uuid
-        *before* the CDR event arrives (click-to-call's START response only
-        returns its own c2c request_uuid, a different identifier space --
-        see module docstring), so there is currently no pre-existing `calls`
-        row to correlate a first-time CDR event against. Until a tenant-
-        resolution path exists for cold CDR events (e.g. per-tenant Superfone
-        credentials), this event is durably recorded in webhook_events only.
+        REMAINING LIMITATION: `calls.customer_id` is NOT NULL, so a `calls`
+        row can only ever be created with a real, known customer -- never a
+        guessed one. tenant_id is now known (see handle_crm_event), which
+        resolves the tenant-isolation half of this gap, but nothing in this
+        integration pass resolves cdr_phone to a customer_id, so a CDR event
+        with no pre-existing correlated `calls` row still cannot create one.
+        That resolution step (phone -> customer, mirroring
+        app.customers.resolver.ContactResolver) is a distinct follow-up.
         """
-        existing = await self._get_calls_row_by_cdr_uuid(cdr_uuid)
+        existing = await self._get_calls_row_by_cdr_uuid(tenant_id, cdr_uuid)
         if not existing:
             logger.warning(
-                f"CRM {event_type} for cdr_uuid={cdr_uuid} has no correlated calls row "
-                "(tenant cannot be safely resolved for a cold CDR event) -- recorded in "
-                "webhook_events only."
+                f"CRM {event_type} for tenant={tenant_id} cdr_uuid={cdr_uuid} has no "
+                "correlated calls row (customer cannot be resolved for a cold CDR event) "
+                "-- recorded in webhook_events only."
             )
             return
 
@@ -379,7 +418,7 @@ class SuperfoneWebhookService:
             text(
                 """
                 UPDATE public.calls
-                SET status = :status::public.call_status,
+                SET status = CAST(:status AS public.call_status),
                     duration_seconds = COALESCE(:duration_seconds, duration_seconds),
                     updated_at = NOW()
                 WHERE id = :id
@@ -392,11 +431,13 @@ class SuperfoneWebhookService:
             },
         )
 
-    async def _apply_crm_recording(self, cdr_uuid: str | None, payload: dict[str, Any]) -> None:
+    async def _apply_crm_recording(
+        self, tenant_id: UUID, cdr_uuid: str | None, payload: dict[str, Any]
+    ) -> None:
         """Store the presigned recording URL. Valid only 7 days -- stored
         with an explicit expiry marker in metadata, never treated as durable.
         No re-hosting/download worker is built in this pass (out of scope)."""
-        existing = await self._get_calls_row_by_cdr_uuid(cdr_uuid)
+        existing = await self._get_calls_row_by_cdr_uuid(tenant_id, cdr_uuid)
         if not existing:
             logger.warning(
                 f"CDR_RECORDING_AVAILABLE for unknown cdr_uuid={cdr_uuid}; nothing to update."
@@ -411,7 +452,7 @@ class SuperfoneWebhookService:
                 """
                 UPDATE public.calls
                 SET recording_url = :recording_url,
-                    metadata = metadata || :meta_fragment::jsonb,
+                    metadata = metadata || CAST(:meta_fragment AS jsonb),
                     updated_at = NOW()
                 WHERE id = :id
                 """
@@ -431,11 +472,13 @@ class SuperfoneWebhookService:
             },
         )
 
-    async def _apply_crm_summary(self, cdr_uuid: str | None, payload: dict[str, Any]) -> None:
+    async def _apply_crm_summary(
+        self, tenant_id: UUID, cdr_uuid: str | None, payload: dict[str, Any]
+    ) -> None:
         """Store the AI-generated call summary/insights/transcript. This
         event carries NO contact/task/staff fields (cdr_phone is null per
         Superfone's docs), so it can only ever update an existing row."""
-        existing = await self._get_calls_row_by_cdr_uuid(cdr_uuid)
+        existing = await self._get_calls_row_by_cdr_uuid(tenant_id, cdr_uuid)
         if not existing:
             logger.warning(
                 f"CDR_SUMMARY_READY for unknown cdr_uuid={cdr_uuid}; nothing to update."
@@ -450,7 +493,7 @@ class SuperfoneWebhookService:
                 """
                 UPDATE public.calls
                 SET call_summary = COALESCE(:summary_text, call_summary),
-                    metadata = metadata || :meta_fragment::jsonb,
+                    metadata = metadata || CAST(:meta_fragment AS jsonb),
                     updated_at = NOW()
                 WHERE id = :id
                 """

@@ -170,7 +170,9 @@ class LeadObservation(Base):
 
     observation_type: Mapped[str] = mapped_column(String, nullable=False)
     observation_value: Mapped[str] = mapped_column(Text, nullable=False)
-    confidence: Mapped[Decimal] = mapped_column(Numeric(3, 2), nullable=False, default=Decimal("1.00"))
+    confidence: Mapped[Decimal] = mapped_column(
+        Numeric(3, 2), nullable=False, default=Decimal("1.00")
+    )
 
     source: Mapped[str] = mapped_column(String, nullable=False, default="ai_call")
     source_call_attempt_id: Mapped[UUID | None] = mapped_column(

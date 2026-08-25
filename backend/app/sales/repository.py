@@ -174,7 +174,8 @@ class PropertySaleRepository:
                 tenant_id, property_id, customer_id, sale_id, purchase_purpose,
                 previous_ownership_id, ownership_start_date, ownership_status, created_by
             ) VALUES (
-                :tenant_id, :property_id, :customer_id, :sale_id, :purchase_purpose::public.purpose,
+                :tenant_id, :property_id, :customer_id, :sale_id,
+                CAST(:purchase_purpose AS public.purpose),
                 :previous_ownership_id, :start_date, 'active'::public.ownership_status, :created_by
             )
             RETURNING *
@@ -218,7 +219,7 @@ class PropertySaleRepository:
             text(
                 """
                 UPDATE public.properties
-                SET status = :status::public.property_status, updated_at = NOW()
+                SET status = CAST(:status AS public.property_status), updated_at = NOW()
                 WHERE id = :id AND tenant_id = :tenant_id
                 """
             ),
@@ -255,7 +256,7 @@ class PropertySaleRepository:
         query = text(
             f"""
             UPDATE public.property_sales
-            SET sale_status = :sale_status::public.sale_status, updated_at = NOW()
+            SET sale_status = CAST(:sale_status AS public.sale_status), updated_at = NOW()
             {where_clause}
             RETURNING *
             """  # noqa: S608
@@ -290,7 +291,7 @@ class PropertySaleRepository:
             params["filter_customer_id"] = filters.customer_id
 
         if filters.sale_status:
-            where_conditions.append("sale_status = :filter_status::public.sale_status")
+            where_conditions.append("sale_status = CAST(:filter_status AS public.sale_status)")
             params["filter_status"] = filters.sale_status
 
         where_str = " AND ".join(where_conditions)
@@ -350,7 +351,8 @@ class PropertySalePaymentRepository:
                 payment_status, reference_number, notes, created_by
             ) VALUES (
                 :tenant_id, :sale_id, COALESCE(:payment_date, CURRENT_DATE), :amount,
-                :payment_mode::public.payment_mode, :payment_status::public.payment_status,
+                CAST(:payment_mode AS public.payment_mode),
+                CAST(:payment_status AS public.payment_status),
                 :reference_number, :notes, :created_by
             )
             RETURNING *
@@ -440,7 +442,9 @@ class PropertySalePaymentRepository:
         params: dict[str, Any] = {"sale_id": sale_id, "tenant_id": tenant_id}
 
         if filters.payment_status:
-            where_conditions.append("payment_status = :filter_status::public.payment_status")
+            where_conditions.append(
+                "payment_status = CAST(:filter_status AS public.payment_status)"
+            )
             params["filter_status"] = filters.payment_status
 
         where_str = " AND ".join(where_conditions)

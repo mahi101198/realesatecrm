@@ -7,7 +7,8 @@ rather than raising and losing every other event in the same delivery)."""
 import logging
 from typing import Any, Literal
 
-from pydantic import BaseModel, ValidationError as PydanticValidationError
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 logger = logging.getLogger(__name__)
 

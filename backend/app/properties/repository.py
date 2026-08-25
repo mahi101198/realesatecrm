@@ -41,12 +41,14 @@ class PropertyRepository:
             ) VALUES (
                 :tenant_id, :project_id, :property_type_id, :property_code, :unit_number, :block,
                 :floor_number, :plot_area, :built_up_area, :carpet_area, :super_built_up_area,
-                :area_unit::public.area_unit, :bedrooms, :bathrooms, :balconies,
+                CAST(:area_unit AS public.area_unit), :bedrooms, :bathrooms, :balconies,
                 :parking_covered, :parking_open,
-                :facing::public.property_facing, :is_corner, :is_park_facing, :is_road_facing,
+                CAST(:facing AS public.property_facing),
+                :is_corner, :is_park_facing, :is_road_facing,
                 :base_price, :offer_price, :price_per_unit, :currency,
-                :status::public.property_status, :is_public, :is_featured, :custom_attributes,
-                :construction_status::public.construction_status,
+                CAST(:status AS public.property_status),
+                :is_public, :is_featured, :custom_attributes,
+                CAST(:construction_status AS public.construction_status),
                 :created_by
             )
             RETURNING *
@@ -184,7 +186,7 @@ class PropertyRepository:
             params["filter_type_id"] = filters.property_type_id
 
         if filters.status:
-            where_conditions.append("status = :filter_status::public.property_status")
+            where_conditions.append("status = CAST(:filter_status AS public.property_status)")
             params["filter_status"] = filters.status
 
         if filters.min_budget is not None:
@@ -208,7 +210,7 @@ class PropertyRepository:
             params["filter_bedrooms"] = filters.bedrooms
 
         if filters.facing:
-            where_conditions.append("facing = :filter_facing::public.property_facing")
+            where_conditions.append("facing = CAST(:filter_facing AS public.property_facing)")
             params["filter_facing"] = filters.facing
 
         if filters.is_corner is not None:
@@ -257,7 +259,7 @@ class PropertyRepository:
                 :p_property_id,
                 :p_lead_id,
                 :p_call_id,
-                :p_new_status::public.property_status,
+                CAST(:p_new_status AS public.property_status),
                 :p_reason,
                 :p_actor_user_id
             )
@@ -333,7 +335,7 @@ class PropertyRepository:
                 """
                 SELECT * FROM public.property_construction_milestones
                 WHERE property_id = :property_id AND tenant_id = :tenant_id
-                  AND milestone = :milestone::public.construction_milestone
+                  AND milestone = CAST(:milestone AS public.construction_milestone)
                 """
             ),
             {"property_id": property_id, "tenant_id": tenant_id, "milestone": milestone},
@@ -357,7 +359,7 @@ class PropertyRepository:
                 INSERT INTO public.property_construction_milestones (
                     tenant_id, property_id, milestone, status, target_date, notes
                 ) VALUES (
-                    :tenant_id, :property_id, :milestone::public.construction_milestone,
+                    :tenant_id, :property_id, CAST(:milestone AS public.construction_milestone),
                     'pending'::public.construction_milestone_status, :target_date, :notes
                 )
                 RETURNING *
@@ -404,7 +406,7 @@ class PropertyRepository:
             UPDATE public.property_construction_milestones
             SET {set_str}, updated_at = NOW()
             WHERE property_id = :property_id AND tenant_id = :tenant_id
-              AND milestone = :milestone::public.construction_milestone
+              AND milestone = CAST(:milestone AS public.construction_milestone)
             RETURNING *
             """  # noqa: S608
         )

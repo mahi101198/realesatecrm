@@ -25,6 +25,8 @@ from app.agent.repository import AgentRepository
 from app.core.config import settings
 from app.core.constants import API_V1_PREFIX
 from app.core.exceptions import AppError, ForbiddenError, NotFoundError
+from app.events.model import EventType
+from app.events.publisher import publish_event
 from app.integrations.superfone.factory import get_sfvopi_client
 
 logger = logging.getLogger(__name__)
@@ -45,7 +47,8 @@ TERMINAL_OUTCOMES = {
 
 
 class AgentGateway:
-    """Boundary abstraction for managing AI agent call lifecycles, context snapshots, and completions."""
+    """Boundary abstraction for managing AI agent call lifecycles, context
+    snapshots, and completions."""
 
     def __init__(self, session: AsyncSession, max_concurrent_calls: int = 10) -> None:
         self.session = session
@@ -54,10 +57,13 @@ class AgentGateway:
         self.context_service = CallContextService(session)
 
     async def prepare_call(self, tenant_id: UUID, call_job_id: UUID) -> dict[str, Any]:
-        """Prepare call job: Build deterministic snapshot context and transition job queued -> preparing -> ready."""
+        """Prepare call job: Build deterministic snapshot context and
+        transition job queued -> preparing -> ready."""
         job = await self.repository.claim_job_for_update(tenant_id, call_job_id)
         if not job:
-            raise NotFoundError(message=f"Call job '{call_job_id}' not found.", code="JOB_NOT_FOUND")
+            raise NotFoundError(
+                message=f"Call job '{call_job_id}' not found.", code="JOB_NOT_FOUND"
+            )
 
         current_status = str(job["status"])
         validate_job_status_transition(current_status, "preparing")
@@ -101,10 +107,13 @@ class AgentGateway:
             raise
 
     async def start_call(self, tenant_id: UUID, call_job_id: UUID) -> dict[str, Any]:
-        """Start call attempt: Re-check DNC, check calling window & concurrency, transition ready -> calling."""
+        """Start call attempt: Re-check DNC, check calling window &
+        concurrency, transition ready -> calling."""
         job = await self.repository.claim_job_for_update(tenant_id, call_job_id)
         if not job:
-            raise NotFoundError(message=f"Call job '{call_job_id}' not found.", code="JOB_NOT_FOUND")
+            raise NotFoundError(
+                message=f"Call job '{call_job_id}' not found.", code="JOB_NOT_FOUND"
+            )
 
         current_status = str(job["status"])
         validate_job_status_transition(current_status, "calling")
@@ -132,7 +141,10 @@ class AgentGateway:
             return {
                 "success": False,
                 "error_code": "OUTSIDE_CALLING_WINDOW",
-                "message": "Call start blocked: Current time is outside allowed calling hours (09:00-20:00 IST).",
+                "message": (
+                    "Call start blocked: Current time is outside allowed "
+                    "calling hours (09:00-20:00 IST)."
+                ),
                 "job": dict(job),
             }
 
@@ -149,7 +161,10 @@ class AgentGateway:
 
         if active_count >= self.orchestrator.max_concurrent_calls:
             raise ForbiddenError(
-                message=f"Tenant concurrency limit of {self.orchestrator.max_concurrent_calls} active calls reached.",
+                message=(
+                    f"Tenant concurrency limit of {self.orchestrator.max_concurrent_calls} "
+                    "active calls reached."
+                ),
                 code="CONCURRENCY_LIMIT_REACHED",
             )
 
@@ -157,7 +172,8 @@ class AgentGateway:
         upd_job_sql = text(
             """
             UPDATE public.call_jobs
-            SET status = 'calling', started_at = NOW(), attempt_count = attempt_count + 1, updated_at = NOW()
+            SET status = 'calling', started_at = NOW(),
+                attempt_count = attempt_count + 1, updated_at = NOW()
             WHERE id = :call_job_id AND tenant_id = :tenant_id
             RETURNING *
             """
@@ -171,9 +187,11 @@ class AgentGateway:
         att_sql = text(
             """
             INSERT INTO public.call_attempts (
-                tenant_id, lead_id, customer_id, call_job_id, attempt_number, status, started_at
+                tenant_id, lead_id, customer_id, call_job_id, attempt_number,
+                status, started_at
             ) VALUES (
-                :tenant_id, :lead_id, :customer_id, :call_job_id, :attempt_number, 'in_progress', NOW()
+                :tenant_id, :lead_id, :customer_id, :call_job_id, :attempt_number,
+                'in_progress', NOW()
             )
             RETURNING *
             """
@@ -189,6 +207,21 @@ class AgentGateway:
             },
         )
         att_row = dict(att_res.mappings().one())
+
+        # Additive instrumentation only -- same session/transaction as the
+        # state change above, so the event cannot outlive a rollback.
+        await publish_event(
+            self.session,
+            tenant_id=tenant_id,
+            event_type=EventType.CALL_STARTED,
+            contact_id=job_row["customer_id"],
+            lead_id=job_row["lead_id"],
+            payload={
+                "call_job_id": str(call_job_id),
+                "call_attempt_id": str(att_row["id"]),
+                "attempt_number": job_row["attempt_count"],
+            },
+        )
 
         # 6. PLACE THE OUTBOUND CALL VIA SUPERFONE SFVOPI
         placement = await self._place_sfvopi_call(tenant_id, job_row, att_row)
@@ -333,17 +366,20 @@ class AgentGateway:
         failure_code: str | None = None,
         failure_message: str | None = None,
     ) -> dict[str, Any]:
-        """Record call completion, update attempt record, apply retry policy, and transition call job state."""
+        """Record call completion, update attempt record, apply retry policy,
+        and transition call job state."""
         job = await self.repository.claim_job_for_update(tenant_id, call_job_id)
         if not job:
-            raise NotFoundError(message=f"Call job '{call_job_id}' not found.", code="JOB_NOT_FOUND")
+            raise NotFoundError(
+                message=f"Call job '{call_job_id}' not found.", code="JOB_NOT_FOUND"
+            )
 
         # 1. Update call_attempts record
         att_sql = text(
             """
             UPDATE public.call_attempts
             SET status = 'completed',
-                outcome = :outcome::public.call_attempt_outcome,
+                outcome = CAST(:outcome AS public.call_attempt_outcome),
                 ended_at = NOW(),
                 duration_seconds = :duration_seconds,
                 provider_call_id = COALESCE(:provider_call_id, provider_call_id),
@@ -378,7 +414,9 @@ class AgentGateway:
             next_status = "retry_pending"
             next_attempt_at = datetime.now(UTC) + timedelta(hours=2)
             error_code = failure_code or f"RETRYABLE_OUTCOME_{outcome.upper()}"
-            error_msg = failure_message or f"Call outcome '{outcome}' queued for retry attempt {attempt_count + 1}."
+            error_msg = failure_message or (
+                f"Call outcome '{outcome}' queued for retry attempt {attempt_count + 1}."
+            )
         elif outcome in RETRYABLE_OUTCOMES:
             next_status = "failed"
             next_attempt_at = None
@@ -395,8 +433,9 @@ class AgentGateway:
         job_sql = text(
             """
             UPDATE public.call_jobs
-            SET status = :next_status::public.call_job_status,
-                completed_at = CASE WHEN :next_status = 'completed' THEN NOW() ELSE completed_at END,
+            SET status = CAST(:next_status AS public.call_job_status),
+                completed_at = CASE WHEN :next_status = 'completed'
+                                    THEN NOW() ELSE completed_at END,
                 next_attempt_at = :next_attempt_at,
                 last_error_code = :error_code,
                 last_error_message = :error_msg,
@@ -417,6 +456,44 @@ class AgentGateway:
             },
         )
         job_row = dict(job_res.mappings().one())
+
+        # call_summary has no other writer: the Superfone hangup webhook
+        # (see webhooks/superfone/service.py) fills in calls.status/ended_at/
+        # duration_seconds independently, but it has no way to know the AI's
+        # own summary of the conversation -- only the agent that ran the call
+        # can supply that, so it is persisted here.
+        if job.get("call_id") and call_summary is not None:
+            await self.session.execute(
+                text(
+                    "UPDATE public.calls SET call_summary = :call_summary, "
+                    "updated_at = NOW() WHERE id = :call_id"
+                ),
+                {"call_summary": call_summary, "call_id": job["call_id"]},
+            )
+
+        # Additive instrumentation only -- 'completed' is the one terminal
+        # success state; 'failed' and 'retry_pending' both mean this attempt
+        # did not connect, so both surface as CALL_FAILED with the job's own
+        # next_status in the payload for anyone who needs the distinction.
+        await publish_event(
+            self.session,
+            tenant_id=tenant_id,
+            event_type=(
+                EventType.CALL_COMPLETED
+                if next_status == "completed"
+                else EventType.CALL_FAILED
+            ),
+            contact_id=job_row["customer_id"],
+            lead_id=job_row["lead_id"],
+            payload={
+                "call_job_id": str(call_job_id),
+                "call_attempt_id": str(call_attempt_id),
+                "outcome": outcome,
+                "next_status": next_status,
+                "duration_seconds": duration_seconds,
+                "error_code": error_code,
+            },
+        )
 
         return {
             "job": job_row,

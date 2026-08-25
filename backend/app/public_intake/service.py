@@ -10,7 +10,10 @@ tenant both produce, so the response itself cannot be used to enumerate
 which tenant slugs exist.
 
 Find-or-create: deliberately NOT CustomerService.create_customer (which 409s
-on duplicate phone -- the wrong contract for anonymous repeat visitors).
+on duplicate phone -- the wrong contract for anonymous repeat visitors). The
+find-or-create itself now lives in the shared deterministic foundation layer,
+app/customers/resolver.py::ContactResolver -- this module no longer carries its
+own copy of that logic.
 """
 
 import logging
@@ -19,7 +22,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import NotFoundError
+from app.customers.resolver import ContactResolver
 from app.db.transaction import atomic
 from app.public_intake.repository import PublicIntakeRepository
 from app.public_intake.schemas import PublicLeadIntakeRequest, PublicLeadIntakeResponse
@@ -33,6 +37,7 @@ class PublicIntakeService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.repository = PublicIntakeRepository(session)
+        self.contact_resolver = ContactResolver(session)
 
     async def resolve_tenant_id(self, tenant_slug: str) -> UUID:
         """Resolve tenant_id from the public slug. Fails closed (404) if the
@@ -75,45 +80,30 @@ class PublicIntakeService:
         data: PublicLeadIntakeRequest,
         lead_source_id: UUID | None,
     ) -> dict[str, Any]:
-        """Genuine find-or-create on (tenant_id, phone). Unlike
-        CustomerService.create_customer, a returning phone number is not an
-        error here -- it is the expected, common case for repeat visitors.
+        """Thin adapter over the shared ContactResolver.
 
-        Also handles the race between two simultaneous first-time submissions
-        for the same new phone number: create_minimal_customer uses
-        ON CONFLICT DO NOTHING and returns None if another request's INSERT
-        won first. Losing that race is not a failure -- the other request's
-        customer row is just as valid to proceed with, so we re-fetch it and
-        continue the flow normally (the visitor still gets a lead reference
-        back, never a 500).
+        Behaviour is unchanged from the copy that used to live here: genuine
+        find-or-create on (tenant_id, phone) -- a returning phone number is not
+        an error, it is the expected case for repeat visitors -- and the race
+        between two simultaneous first-time submissions for the same new number
+        is resolved by re-fetching the winner's row rather than 500ing. Both of
+        those now happen inside ContactResolver.resolve_contact, including the
+        same CUSTOMER_CREATE_CONFLICT error code on the pathological path.
         """
-        existing = await self.repository.get_customer_by_phone(tenant_id, data.phone)
-        if existing:
-            return existing
-
-        created = await self.repository.create_minimal_customer(
-            tenant_id=tenant_id,
-            full_name=data.name,
+        # `email` is passed as a CREATE-time default only, never as a lookup
+        # key: identity here is (tenant_id, phone), exactly as before. Matching
+        # an anonymous web submission onto an existing contact by email alone
+        # would be a new, weaker identity rule -- out of scope for a
+        # consolidation refactor.
+        return await self.contact_resolver.resolve_contact(
+            tenant_id,
             phone=data.phone,
-            email=data.email,
-            lead_source_id=lead_source_id,
-        )
-        if created:
-            return created
-
-        winner = await self.repository.get_customer_by_phone(tenant_id, data.phone)
-        if winner:
-            return winner
-
-        # Vanishingly unlikely (e.g. the winning row was soft-deleted in the
-        # instant between our ON CONFLICT DO NOTHING and this re-fetch) --
-        # surface a clean, typed error rather than proceeding with no customer.
-        raise ConflictError(
-            message=(
-                "Could not complete this enquiry due to a temporary conflict. "
-                "Please try again."
-            ),
-            code="CUSTOMER_CREATE_CONFLICT",
+            defaults={
+                "full_name": data.name,
+                "email": data.email,
+                "lead_source_id": lead_source_id,
+                "source": "public_intake",
+            },
         )
 
     async def _maybe_record_property_interest(

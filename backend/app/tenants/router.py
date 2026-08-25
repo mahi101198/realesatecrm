@@ -19,6 +19,8 @@ from app.core.permissions import Permission, ensure_tenant_resource_access
 from app.core.request_context import RequestContext
 from app.db.session import get_db_session
 from app.tenants.schemas import (
+    SuperfoneCrmConfigResponse,
+    SuperfoneCrmConfigUpsertRequest,
     TenantResponse,
     TenantUpdate,
     WhatsAppConfigResponse,
@@ -116,3 +118,51 @@ async def get_tenant_whatsapp_config(
     """Get tenant WhatsApp config endpoint."""
     service = TenantService(session)
     return await service.get_whatsapp_config(tenant_id)
+
+
+@router.put(
+    "/{tenant_id}/superfone-crm-config",
+    response_model=SuperfoneCrmConfigResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Create/Rotate Tenant Superfone CRM Webhook Secret",
+    description=(
+        "Create or rotate the bearer secret this tenant's Superfone CRM "
+        "dashboard automation must present on "
+        "/webhooks/superfone/crm/{tenant_id}/events/{event_type}. "
+        "Super-admin only. Only a one-way hash is stored; the secret is "
+        "never echoed back in this or any other response."
+    ),
+)
+async def upsert_tenant_superfone_crm_config(
+    tenant_id: UUID,
+    data: SuperfoneCrmConfigUpsertRequest,
+    _context: RequestContext = Depends(
+        require_permission(Permission.PLATFORM_SUPERFONE_CRM_CONFIG_MANAGE)
+    ),
+    session: AsyncSession = Depends(get_db_session),
+) -> SuperfoneCrmConfigResponse:
+    """Upsert tenant Superfone CRM webhook config endpoint."""
+    service = TenantService(session)
+    return await service.upsert_superfone_crm_config(tenant_id, data)
+
+
+@router.get(
+    "/{tenant_id}/superfone-crm-config",
+    response_model=SuperfoneCrmConfigResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Tenant Superfone CRM Webhook Config",
+    description=(
+        "Fetch a tenant's Superfone CRM webhook config metadata (never the "
+        "secret or its hash). Super-admin only."
+    ),
+)
+async def get_tenant_superfone_crm_config(
+    tenant_id: UUID,
+    _context: RequestContext = Depends(
+        require_permission(Permission.PLATFORM_SUPERFONE_CRM_CONFIG_MANAGE)
+    ),
+    session: AsyncSession = Depends(get_db_session),
+) -> SuperfoneCrmConfigResponse:
+    """Get tenant Superfone CRM webhook config endpoint."""
+    service = TenantService(session)
+    return await service.get_superfone_crm_config(tenant_id)

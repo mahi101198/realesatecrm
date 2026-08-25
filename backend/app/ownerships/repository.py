@@ -92,7 +92,9 @@ class PropertyOwnershipRepository:
             set_clauses.append("verified_by = :verified_by")
             params["verified_by"] = verified_by
         if ownership_status is not None:
-            set_clauses.append("ownership_status = :ownership_status::public.ownership_status")
+            set_clauses.append(
+                "ownership_status = CAST(:ownership_status AS public.ownership_status)"
+            )
             params["ownership_status"] = ownership_status
 
         if not set_clauses:
@@ -285,7 +287,9 @@ class PropertyResaleListingRepository:
             params["filter_ownership_id"] = filters.ownership_id
 
         if filters.listing_status:
-            where_conditions.append("listing_status = :filter_status::public.resale_listing_status")
+            where_conditions.append(
+                "listing_status = CAST(:filter_status AS public.resale_listing_status)"
+            )
             params["filter_status"] = filters.listing_status
 
         where_str = " AND ".join(where_conditions)

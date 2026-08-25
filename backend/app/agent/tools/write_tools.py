@@ -9,6 +9,7 @@ from uuid import UUID
 from pydantic import EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.handoff_service import SalesHandoffService
 from app.agent.repository import AgentRepository
 from app.appointments.schemas import AppointmentCancelRequest, AppointmentCreate, AppointmentUpdate
 from app.appointments.service import AppointmentService
@@ -42,7 +43,10 @@ async def update_lead_requirements_tool(
     context: RequestContext,
     session: AsyncSession,
     lead_id: UUID,
-    property_type: str | None = None,
+    property_type: str | None = None,  # noqa: ARG001 -- lead_requirements has
+    # no property_type column; the structured fields below are what's writable
+    # here, use record_call_observation_tool(observation_type="interest", ...)
+    # to capture a free-text property-type/interest signal instead.
     preferred_location: str | None = None,
     budget_min: Decimal | float | None = None,
     budget_max: Decimal | float | None = None,
@@ -53,7 +57,8 @@ async def update_lead_requirements_tool(
     financing_requirement: str | None = None,
     source_call_attempt_id: UUID | None = None,
 ) -> dict[str, Any]:
-    """AI Tool: Update structured lead requirements with automatic requirement history audit logging."""
+    """AI Tool: Update structured lead requirements with automatic
+    requirement history audit logging."""
     try:
         check_permission(context, Permission.LEAD_UPDATE)
         tenant_id = resolve_tenant_scope(context)
@@ -215,7 +220,8 @@ async def create_follow_up_tool(
         is_dnc = await repo.check_do_not_call(tenant_id, customer_id)
         if is_dnc:
             return _error_response(
-                "DO_NOT_CALL_ACTIVE", "Cannot schedule follow-up: Customer is marked as Do-Not-Call."
+                "DO_NOT_CALL_ACTIVE",
+                "Cannot schedule follow-up: Customer is marked as Do-Not-Call.",
             )
 
         if isinstance(scheduled_at, str):
@@ -397,15 +403,20 @@ async def request_sales_agent_transfer_tool(
     reason: str | None = None,
     priority: int = 5,
 ) -> dict[str, Any]:
-    """AI Tool: Initiate structured human sales agent transfer/handoff."""
+    """AI Tool: Initiate structured human sales agent transfer/handoff.
+
+    The handoff is stored with its deterministic context bundle (contact +
+    lead summary + prior AI actions) so the receiving human is briefed --
+    see app/agent/handoff_service.py for what is real now vs. a phase-2
+    placeholder."""
     try:
         check_permission(context, Permission.LEAD_ASSIGN)
         tenant_id = resolve_tenant_scope(context)
         if tenant_id is None:
             return _error_response("MISSING_TENANT_SCOPE", "Tenant scope required.")
 
-        repo = AgentRepository(session)
-        res = await repo.create_sales_handoff(
+        service = SalesHandoffService(session)
+        res = await service.request_handoff(
             tenant_id, lead_id, customer_id, reason, priority, "Initiated by AI agent"
         )
         return _success_response(
@@ -529,11 +540,18 @@ async def create_sales_callback_tool(
         is_dnc = await repo.check_do_not_call(tenant_id, customer_id)
         if is_dnc:
             return _error_response(
-                "DO_NOT_CALL_ACTIVE", "Cannot schedule sales callback: Customer is marked as Do-Not-Call."
+                "DO_NOT_CALL_ACTIVE",
+                "Cannot schedule sales callback: Customer is marked as Do-Not-Call.",
             )
 
         res = await repo.create_lead_follow_up(
-            tenant_id, lead_id, customer_id, scheduled_at, "human_callback", reason, "Human sales callback requested"
+            tenant_id,
+            lead_id,
+            customer_id,
+            scheduled_at,
+            "human_callback",
+            reason,
+            "Human sales callback requested",
         )
         return _success_response(
             {

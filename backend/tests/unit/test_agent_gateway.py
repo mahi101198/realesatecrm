@@ -114,8 +114,10 @@ async def test_agent_gateway_record_call_completed_retry_policy() -> None:
         "id": call_job_id,
         "status": "retry_pending",
         "attempt_count": 1,
+        "customer_id": uuid4(),
+        "lead_id": uuid4(),
     }
-    mock_session.execute.side_effect = [mock_att_res, mock_job_res]
+    mock_session.execute.side_effect = [mock_att_res, mock_job_res, MagicMock()]
 
     res = await gateway.record_call_completed(
         tenant_id=tenant_id,
@@ -126,6 +128,114 @@ async def test_agent_gateway_record_call_completed_retry_policy() -> None:
     )
     assert res["next_status"] == "retry_pending"
     assert res["job"]["status"] == "retry_pending"
+
+
+@pytest.mark.asyncio
+async def test_agent_gateway_record_call_completed_persists_call_summary() -> None:
+    """call_summary has no writer besides record_call_completed (the Superfone
+    hangup webhook fills in status/duration but never sees the AI's own
+    summary of the call) -- verify it actually reaches public.calls."""
+    mock_session = AsyncMock()
+    gateway = AgentGateway(mock_session)
+
+    tenant_id = uuid4()
+    call_job_id = uuid4()
+    attempt_id = uuid4()
+    call_id = uuid4()
+
+    gateway.repository.claim_job_for_update = AsyncMock(
+        return_value={
+            "id": call_job_id,
+            "tenant_id": tenant_id,
+            "status": "calling",
+            "attempt_count": 1,
+            "max_attempts": 3,
+            "call_id": call_id,
+        }
+    )
+
+    mock_att_res = MagicMock()
+    mock_att_res.mappings.return_value.one_or_none.return_value = {
+        "id": attempt_id,
+        "status": "completed",
+        "outcome": "connected",
+    }
+    mock_job_res = MagicMock()
+    mock_job_res.mappings.return_value.one.return_value = {
+        "id": call_job_id,
+        "status": "completed",
+        "attempt_count": 1,
+        "customer_id": uuid4(),
+        "lead_id": uuid4(),
+    }
+    mock_session.execute.side_effect = [mock_att_res, mock_job_res, MagicMock(), MagicMock()]
+
+    await gateway.record_call_completed(
+        tenant_id=tenant_id,
+        call_job_id=call_job_id,
+        call_attempt_id=attempt_id,
+        outcome="connected",
+        duration_seconds=120,
+        call_summary="Customer asked to see a 2BHK next week.",
+    )
+
+    calls_update_call = mock_session.execute.call_args_list[2]
+    sql_text, params = calls_update_call.args
+    assert "UPDATE public.calls" in str(sql_text)
+    assert params == {
+        "call_summary": "Customer asked to see a 2BHK next week.",
+        "call_id": call_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_agent_gateway_record_call_completed_skips_summary_write_when_absent() -> None:
+    """No call_id on the job (never placed) or no summary text -- the extra
+    UPDATE must not run at all, since public.calls has no row to write to
+    (or nothing to persist)."""
+    mock_session = AsyncMock()
+    gateway = AgentGateway(mock_session)
+
+    tenant_id = uuid4()
+    call_job_id = uuid4()
+    attempt_id = uuid4()
+
+    gateway.repository.claim_job_for_update = AsyncMock(
+        return_value={
+            "id": call_job_id,
+            "tenant_id": tenant_id,
+            "status": "calling",
+            "attempt_count": 1,
+            "max_attempts": 3,
+        }
+    )
+
+    mock_att_res = MagicMock()
+    mock_att_res.mappings.return_value.one_or_none.return_value = {
+        "id": attempt_id,
+        "status": "completed",
+        "outcome": "connected",
+    }
+    mock_job_res = MagicMock()
+    mock_job_res.mappings.return_value.one.return_value = {
+        "id": call_job_id,
+        "status": "completed",
+        "attempt_count": 1,
+        "customer_id": uuid4(),
+        "lead_id": uuid4(),
+    }
+    mock_session.execute.side_effect = [mock_att_res, mock_job_res, MagicMock()]
+
+    await gateway.record_call_completed(
+        tenant_id=tenant_id,
+        call_job_id=call_job_id,
+        call_attempt_id=attempt_id,
+        outcome="connected",
+        duration_seconds=120,
+        call_summary="This should never be written -- no call_id on the job.",
+    )
+
+    assert mock_session.execute.call_count == 3
 
 
 @pytest.mark.asyncio

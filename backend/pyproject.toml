@@ -35,6 +35,22 @@ dependencies = [
 
     # Outbound HTTP client (Superfone telephony integration)
     "httpx>=0.27.0",
+
+    # AI orchestration (LangGraph lead workflow) + LLM provider.
+    # Anthropic is the ONLY LLM provider this codebase targets.
+    "langgraph>=1.0.0",
+    "anthropic>=0.60.0",
+
+    # Voice media plane. `livekit-api` is the server-side room/token surface;
+    # `livekit-agents` is the agent framework (it re-exports `livekit.rtc` for
+    # AudioSource/AudioFrame). Neither is imported at module scope anywhere in
+    # app/ — app/voice/ imports them lazily inside functions so an unconfigured
+    # deployment never pays the import cost and the SDK stays trivially
+    # mockable in tests. No STT/TTS provider plugin is pinned on purpose: the
+    # pipeline takes them by injection (see app/voice/pipeline.py), so a
+    # deployment installs only the `livekit-plugins-*` it actually uses.
+    "livekit-agents>=1.7.0",
+    "livekit-api>=1.2.0",
 ]
 
 [project.optional-dependencies]

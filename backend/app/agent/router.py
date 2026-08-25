@@ -26,12 +26,23 @@ from app.db.session import get_db_session
 router = APIRouter(prefix="/agent", tags=["AI Voice Agent CRM"])
 
 
+def _tenant_required_error() -> dict[str, Any]:
+    return {
+        "success": False,
+        "error_code": "TENANT_REQUIRED",
+        "message": "Tenant scope is required.",
+    }
+
+
 @router.get(
     "/context/{lead_id}",
     response_model=AgentPreCallContext,
     status_code=status.HTTP_200_OK,
     summary="Get Pre-Call Context",
-    description="Retrieve authoritative, deterministic pre-call context snapshot for AI Voice Agent at call start.",
+    description=(
+        "Retrieve authoritative, deterministic pre-call context snapshot for "
+        "AI Voice Agent at call start."
+    ),
 )
 async def get_agent_pre_call_context(
     lead_id: UUID,
@@ -51,7 +62,10 @@ async def get_agent_pre_call_context(
     response_model=ToolResponse,
     status_code=status.HTTP_200_OK,
     summary="Execute Agent Tool",
-    description="Invoke one of the 20 registered AI Agent tools securely with authorization, tenant scope enforcement, and idempotency.",
+    description=(
+        "Invoke one of the 20 registered AI Agent tools securely with "
+        "authorization, tenant scope enforcement, and idempotency."
+    ),
 )
 async def execute_agent_tool(
     body: ToolExecuteRequest,
@@ -79,7 +93,10 @@ async def execute_agent_tool(
     "/calls/prepare",
     status_code=status.HTTP_200_OK,
     summary="Prepare Call Job",
-    description="Prepare call job for external AI agent: generates snapshot context and transitions state queued -> preparing -> ready.",
+    description=(
+        "Prepare call job for external AI agent: generates snapshot context "
+        "and transitions state queued -> preparing -> ready."
+    ),
 )
 async def prepare_call(
     body: CallPrepareInput,
@@ -89,7 +106,7 @@ async def prepare_call(
     """Prepare call job."""
     tenant_id = resolve_tenant_scope(context)
     if tenant_id is None:
-        return {"success": False, "error_code": "TENANT_REQUIRED", "message": "Tenant scope is required."}
+        return _tenant_required_error()
 
     gateway = AgentGateway(session)
     res = await gateway.prepare_call(tenant_id, body.call_job_id)
@@ -100,7 +117,10 @@ async def prepare_call(
     "/calls/start",
     status_code=status.HTTP_200_OK,
     summary="Start Call Attempt",
-    description="Re-check DNC, verify calling window & concurrency, claim job, and record call attempt.",
+    description=(
+        "Re-check DNC, verify calling window & concurrency, claim job, and "
+        "record call attempt."
+    ),
 )
 async def start_call(
     body: CallPrepareInput,
@@ -110,18 +130,20 @@ async def start_call(
     """Start call attempt."""
     tenant_id = resolve_tenant_scope(context)
     if tenant_id is None:
-        return {"success": False, "error_code": "TENANT_REQUIRED", "message": "Tenant scope is required."}
+        return _tenant_required_error()
 
     gateway = AgentGateway(session)
-    res = await gateway.start_call(tenant_id, body.call_job_id)
-    return res
+    return await gateway.start_call(tenant_id, body.call_job_id)
 
 
 @router.post(
     "/calls/complete",
     status_code=status.HTTP_200_OK,
     summary="Record Call Completion",
-    description="Record call attempt completion, apply outcome retry rules, and finalize call job status.",
+    description=(
+        "Record call attempt completion, apply outcome retry rules, and "
+        "finalize call job status."
+    ),
 )
 async def complete_call(
     body: CallCompleteInput,
@@ -131,7 +153,7 @@ async def complete_call(
     """Record call completion."""
     tenant_id = resolve_tenant_scope(context)
     if tenant_id is None:
-        return {"success": False, "error_code": "TENANT_REQUIRED", "message": "Tenant scope is required."}
+        return _tenant_required_error()
 
     gateway = AgentGateway(session)
     res = await gateway.record_call_completed(
@@ -153,7 +175,10 @@ async def complete_call(
     "/calls/reconcile-stuck",
     status_code=status.HTTP_200_OK,
     summary="Reconcile Stuck Jobs",
-    description="Reconcile active call jobs stuck in preparing, ready, or calling beyond timeout threshold.",
+    description=(
+        "Reconcile active call jobs stuck in preparing, ready, or calling "
+        "beyond timeout threshold."
+    ),
 )
 async def reconcile_stuck_jobs(
     timeout_minutes: int = Query(15, ge=1, le=120),
@@ -163,7 +188,9 @@ async def reconcile_stuck_jobs(
     """Reconcile stuck jobs."""
     tenant_id = resolve_tenant_scope(context)
     gateway = AgentGateway(session)
-    reconciled = await gateway.reconcile_stuck_jobs(tenant_id=tenant_id, timeout_minutes=timeout_minutes)
+    reconciled = await gateway.reconcile_stuck_jobs(
+        tenant_id=tenant_id, timeout_minutes=timeout_minutes
+    )
     return {"success": True, "data": reconciled, "reconciled_count": len(reconciled)}
 
 
@@ -182,7 +209,7 @@ async def create_call_job(
     """Create a call job."""
     tenant_id = resolve_tenant_scope(context)
     if tenant_id is None:
-        return {"success": False, "error_code": "TENANT_REQUIRED", "message": "Tenant scope is required."}
+        return _tenant_required_error()
 
     orchestrator = CallOrchestrator(session)
     job = await orchestrator.create_call_job(
@@ -215,11 +242,7 @@ async def accept_sales_handoff(
     """Accept sales handoff and place click-to-call bridge."""
     tenant_id = resolve_tenant_scope(context)
     if tenant_id is None:
-        return {
-            "success": False,
-            "error_code": "TENANT_REQUIRED",
-            "message": "Tenant scope is required.",
-        }
+        return _tenant_required_error()
 
     service = SalesHandoffService(session)
     result = await service.accept_handoff(tenant_id, handoff_id, context.user_id)

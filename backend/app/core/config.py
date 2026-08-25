@@ -124,21 +124,15 @@ class Settings(BaseSettings):
             "auth header, so this URL-embedded token is our own defense-in-depth."
         ),
     )
-    SUPERFONE_CRM_WEBHOOK_BEARER_SECRET: SecretStr = Field(
-        default=SecretStr(""),
-        description=(
-            "Expected value of the Authorization: Bearer header on Superfone CRM "
-            "event-notification webhooks. Configured manually in Superfone's "
-            "dashboard automations UI (their CRM webhooks DO support a "
-            "dashboard-configured auth header, unlike SFVoPI's)."
-        ),
-    )
     VOICE_AGENT_STREAM_URL: str = Field(
         default="",
         description=(
-            "External wss:// endpoint for the voice-agent audio stream. This repo "
-            "does not run that WebSocket server -- the SFVoPI answer webhook only "
-            "returns Stream JSON pointing at it."
+            "wss:// endpoint the SFVoPI answer webhook advertises in its Stream JSON, "
+            "i.e. where Superfone opens the bidirectional media WebSocket. Historically "
+            "this pointed at an external service; `app/voice/router.py` now implements "
+            "a compatible endpoint inside this app "
+            "(wss://<host>{API_V1_PREFIX}/voice/stream), so this should normally be set "
+            "to that URL. Left configurable so an external bridge can still be used."
         ),
     )
     VOICE_AGENT_STREAM_CODEC: str = Field(
@@ -151,6 +145,96 @@ class Settings(BaseSettings):
     VOICE_AGENT_STREAM_SAMPLE_RATE: int = Field(
         default=8000,
         description="Sample rate (Hz) for the SFVoPI media stream.",
+    )
+
+    # ---- LiveKit (voice-agent media plane) -----------------------------
+    # LiveKit does NOT replace Superfone: Superfone still dials the PSTN leg
+    # and still streams that leg's audio to VOICE_AGENT_STREAM_URL. LiveKit is
+    # the room this app bridges that audio INTO so an AI agent can participate.
+    # Optional by design, exactly like ANTHROPIC_API_KEY: with any of these
+    # three empty, `app/voice/livekit_gateway.py::is_livekit_configured` is
+    # False, the whole voice layer no-ops, and the call still gets placed and
+    # tracked by the existing Superfone flow -- it just has no AI in the room.
+    LIVEKIT_URL: str = Field(
+        default="",
+        description=(
+            "LiveKit server URL (wss://<project>.livekit.cloud). Empty disables the "
+            "voice-agent media plane entirely."
+        ),
+    )
+    LIVEKIT_API_KEY: SecretStr = Field(
+        default=SecretStr(""),
+        description="LiveKit API key used to mint room access tokens and manage rooms.",
+    )
+    LIVEKIT_API_SECRET: SecretStr = Field(
+        default=SecretStr(""),
+        description="LiveKit API secret paired with LIVEKIT_API_KEY. Never logged.",
+    )
+    VOICE_AGENT_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "Master kill-switch for the AI voice-agent layer, mirroring "
+            "AI_ORCHESTRATOR_ENABLED. When False (or when LiveKit/Anthropic "
+            "credentials are missing) Superfone media streams are accepted and "
+            "closed cleanly instead of being bridged into a LiveKit room."
+        ),
+    )
+
+    # ---- LiveKit Inference Gateway (voice reasoning + speech models) ----
+    # The voice agent does NOT reason through Anthropic. It reasons through
+    # LiveKit's Inference Gateway, authenticated with the LIVEKIT_API_KEY /
+    # LIVEKIT_API_SECRET pair above (no extra credential), so the whole voice
+    # turn -- speech in, reasoning, speech out -- lives behind one vendor and
+    # one round trip to one edge. WhatsApp keeps using Anthropic
+    # (`app/agents/llm.py`); these two backends are parallel, not layered.
+    #
+    # Every default is "" on purpose: an unset model id means the voice layer
+    # simply never registers that provider and degrades to "the Superfone call
+    # happens, it just carries no AI" -- identical to the posture every other
+    # optional provider in this file takes.
+    VOICE_LLM_MODEL: str = Field(
+        default="",
+        description=(
+            "LiveKit Inference model id used for the voice agent's reasoning "
+            "turns (e.g. 'google/gemma-4-31b-it'). Empty disables the voice "
+            "reasoning plane, which disables the voice agent entirely."
+        ),
+    )
+    VOICE_STT_MODEL: str = Field(
+        default="",
+        description=(
+            "LiveKit Inference speech-to-text model id (e.g. 'deepgram/nova-3'). "
+            "Empty means no STT provider is registered and the voice pipeline "
+            "stays unconfigured."
+        ),
+    )
+    VOICE_STT_LANGUAGE: str = Field(
+        default="",
+        description=(
+            "Language hint for the STT model. 'multi' lets one model handle the "
+            "Hindi/English code-switching that is normal on Indian telephony."
+        ),
+    )
+    VOICE_TTS_MODEL: str = Field(
+        default="",
+        description=(
+            "LiveKit Inference text-to-speech model id (e.g. 'cartesia/sonic-3'). "
+            "Empty means no TTS provider is registered."
+        ),
+    )
+    VOICE_TTS_VOICE_ID: str = Field(
+        default="",
+        description=(
+            "Provider-specific voice id the TTS model speaks with. Required "
+            "alongside VOICE_TTS_MODEL; empty leaves TTS unregistered."
+        ),
+    )
+    VOICE_TTS_LANGUAGE: str = Field(
+        default="",
+        description=(
+            "Language the TTS voice speaks (e.g. 'hi'). Kept separate from "
+            "VOICE_STT_LANGUAGE: we listen in many languages but answer in one."
+        ),
     )
 
     WHATSAPP_CREDENTIALS_ENCRYPTION_KEY: SecretStr = Field(
@@ -173,6 +257,44 @@ class Settings(BaseSettings):
             "requests (POST /webhooks/whatsapp-dashboard/call-agent). That "
             "product is a separate, unmodified repository -- this secret is "
             "configured as its CALL_AGENT_API_KEY environment variable."
+        ),
+    )
+
+    # ---- Anthropic (AI orchestration + WhatsApp conversational layer) ----
+    # Optional by design: the whole AI layer fails CLOSED when the key is
+    # empty. `app/agents/llm.py::is_llm_configured` gates every entry point,
+    # so a deployment without a key keeps the deterministic CRM/webhook
+    # pipeline working exactly as before instead of erroring per message.
+    ANTHROPIC_API_KEY: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "API key for the Anthropic Messages API, used by the lead workflow "
+            "orchestrator (intent classification) and the WhatsApp agent (reply "
+            "composition). Empty disables the AI layer entirely."
+        ),
+    )
+    ANTHROPIC_MODEL: str = Field(
+        default="claude-opus-5",
+        description=(
+            "Anthropic model id used for every AI call in this app. Configurable "
+            "on purpose -- swap to a cheaper tier (e.g. claude-haiku-4-5) for "
+            "high-volume WhatsApp traffic without touching code."
+        ),
+    )
+    ANTHROPIC_MAX_TOKENS: int = Field(
+        default=2048,
+        description=(
+            "Default max_tokens for AI calls. Sized for short WhatsApp replies and "
+            "small structured-output payloads; note this caps thinking + response "
+            "text together."
+        ),
+    )
+    AI_ORCHESTRATOR_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "Master kill-switch for the inbound-WhatsApp AI orchestration layer. "
+            "When False (or when ANTHROPIC_API_KEY is empty) inbound messages are "
+            "still stored and instrumented, but no AI reply/action is produced."
         ),
     )
 

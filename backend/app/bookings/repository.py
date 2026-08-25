@@ -80,7 +80,7 @@ class PropertyBookingRepository:
             params["tenant_id"] = tenant_id
 
         if booking_status is not None:
-            set_clauses.append("booking_status = :booking_status::public.booking_status")
+            set_clauses.append("booking_status = CAST(:booking_status AS public.booking_status)")
             params["booking_status"] = booking_status
         if notes_provided:
             set_clauses.append("notes = :notes")
@@ -132,7 +132,9 @@ class PropertyBookingRepository:
             params["filter_customer_id"] = filters.customer_id
 
         if filters.booking_status:
-            where_conditions.append("booking_status = :filter_status::public.booking_status")
+            where_conditions.append(
+                "booking_status = CAST(:filter_status AS public.booking_status)"
+            )
             params["filter_status"] = filters.booking_status
 
         where_str = " AND ".join(where_conditions)

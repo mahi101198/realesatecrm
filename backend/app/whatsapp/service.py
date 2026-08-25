@@ -9,6 +9,8 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import BusinessRuleError, NotFoundError
+from app.events.model import EventType
+from app.events.publisher import publish_event
 from app.integrations.whatsapp.factory import get_client_for_tenant
 from app.shared.schemas import PaginatedResponse, PaginationParams
 from app.whatsapp.repository import WhatsAppRepository
@@ -123,6 +125,25 @@ class WhatsAppService:
             summary=f"WhatsApp {data.message_type} message sent",
             initiated_by="user" if created_by else "system",
             initiated_by_id=created_by,
+        )
+
+        # Additive instrumentation only -- same session, no control-flow change.
+        # conversation_id is left NULL here: the outbound send path is not wired
+        # to the conversation layer in this phase (only inbound is), and a
+        # guessed conversation would be worse than none.
+        await publish_event(
+            self.session,
+            tenant_id=tenant_id,
+            event_type=EventType.MESSAGE_SENT,
+            contact_id=data.customer_id,
+            lead_id=data.lead_id,
+            payload={
+                "channel": "whatsapp",
+                "provider_message_id": result["message_id"],
+                "message_type": data.message_type,
+                "whatsapp_message_id": str(row["id"]),
+                "initiated_by": "user" if created_by else "system",
+            },
         )
 
         return WhatsAppMessageResponse.model_validate(row)

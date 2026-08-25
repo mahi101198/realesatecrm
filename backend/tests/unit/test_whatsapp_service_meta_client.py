@@ -2,7 +2,7 @@
 per-tenant Meta client factory instead of the (deleted) Superfone client."""
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -18,6 +18,12 @@ async def test_send_message_uses_tenant_scoped_meta_client() -> None:
     send is always stored with status='sent' (Meta's synchronous response
     carries no delivery status -- that arrives later via webhook)."""
     mock_session = AsyncMock()
+    # publish_event() issues its own session.execute(); an unconfigured
+    # AsyncMock's attribute chain returns coroutines all the way down, so
+    # `.mappings().one_or_none()` needs an explicit synchronous MagicMock.
+    mock_event_result = MagicMock()
+    mock_event_result.mappings.return_value.one_or_none.return_value = {"id": uuid4()}
+    mock_session.execute.return_value = mock_event_result
     service = WhatsAppService(mock_session)
     tenant_id = uuid4()
     customer_id = uuid4()

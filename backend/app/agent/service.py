@@ -58,7 +58,7 @@ class AgentContextService:
             LEFT JOIN public.users u ON sa.user_id = u.id
             WHERE l.id = :lead_id
               AND l.deleted_at IS NULL
-              AND (:tenant_id::uuid IS NULL OR l.tenant_id = :tenant_id)
+              AND (CAST(:tenant_id AS uuid) IS NULL OR l.tenant_id = CAST(:tenant_id AS uuid))
             """
         )
         result = await self.session.execute(

@@ -1,12 +1,42 @@
-"""Sales Handoff Acceptance Service.
+"""Sales Handoff Request + Acceptance Service.
 
-The natural integration point for click-to-call is NOT the moment a handoff
-is requested (request_sales_agent_transfer_tool / create_sales_handoff) --
-at that point no specific staff member or phone number is known yet, only
-that a human transfer is wanted. Superfone's click-to-call requires a real
-`user_number` (a specific staff member's Superfone-registered phone) and
-`customer_number`, so it can only fire once a staff member actually accepts
-the handoff. This service is that acceptance action.
+REQUEST (`request_handoff`) records that a human transfer is wanted, together
+with the context bundle the receiving human needs so they do not have to
+re-ask everything the AI already established. What that bundle contains:
+
+  REAL NOW (deterministic, no model involved -- built by
+  AgentRepository.build_handoff_context_bundle from tenant-scoped rows):
+    * sales_handoffs.reason            -- why the transfer was asked for
+                                          (pre-existing column, unchanged)
+    * sales_handoffs.context_snapshot  -- contact summary (name/phone/email/
+                                          city/language/contact prefs/DNC
+                                          flags) + current lead summary
+                                          (lead_number, status, sales_stage,
+                                          score, interest level, budget
+                                          min/max, bedrooms, preferred
+                                          city/locality, timeline, finance
+                                          requirement) + up to 5 property/
+                                          project interests
+    * sales_handoffs.prior_ai_actions  -- newline digest of the 10 most recent
+                                          public.activities rows for this lead,
+                                          i.e. the tool executions
+                                          dispatch_agent_tool already audits
+
+  PLACEHOLDER FOR PHASE 2 (nullable, left NULL here):
+    * sales_handoffs.conversation_summary -- a natural-language recap. Nothing
+                                          in the deterministic foundation layer
+                                          writes it; an AI summarizer will.
+                                          `context_snapshot.conversation_summary_status`
+                                          is set to 'pending_phase_2_ai_summarizer'
+                                          so a reader can tell "not summarized
+                                          yet" from "nothing to summarize".
+
+ACCEPTANCE (`accept_handoff`) is where click-to-call fires. It is NOT the
+moment the handoff is requested -- at request time no specific staff member or
+phone number is known yet, only that a human transfer is wanted. Superfone's
+click-to-call requires a real `user_number` (a specific staff member's
+Superfone-registered phone) and `customer_number`, so it can only fire once a
+staff member actually accepts.
 """
 
 import logging
@@ -23,12 +53,42 @@ logger = logging.getLogger(__name__)
 
 
 class SalesHandoffService:
-    """Service accepting a sales handoff and bridging the call via Superfone
-    CRM click-to-call."""
+    """Service requesting a sales handoff (with its context bundle) and
+    accepting one, bridging the call via Superfone CRM click-to-call."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.repository = AgentRepository(session)
+
+    async def request_handoff(
+        self,
+        tenant_id: UUID,
+        lead_id: UUID,
+        customer_id: UUID,
+        reason: str | None = None,
+        priority: int = 5,
+        notes: str | None = None,
+        conversation_summary: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a 'requested' handoff with its context bundle attached.
+
+        Tenant scoping: the repository verifies the lead AND customer belong to
+        `tenant_id` before inserting, and every bundle query filters on
+        `tenant_id`. A HUMAN_HANDOFF_REQUESTED domain event is written in the
+        same transaction.
+
+        `conversation_summary` is accepted but expected to be None in this
+        phase -- see the module docstring.
+        """
+        return await self.repository.create_sales_handoff(
+            tenant_id,
+            lead_id,
+            customer_id,
+            reason,
+            priority,
+            notes,
+            conversation_summary=conversation_summary,
+        )
 
     async def accept_handoff(
         self, tenant_id: UUID, handoff_id: UUID, assigned_user_id: UUID

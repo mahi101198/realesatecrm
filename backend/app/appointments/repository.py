@@ -41,7 +41,7 @@ class AppointmentRepository:
             WHERE sales_agent_id = :agent_id
               AND status NOT IN ('cancelled', 'rescheduled')
               AND appointment_range && tstzrange(:start_time, :end_time, '[)')
-              AND (:tenant_id::uuid IS NULL OR tenant_id = :tenant_id)
+              AND (CAST(:tenant_id AS uuid) IS NULL OR tenant_id = CAST(:tenant_id AS uuid))
             """
         )
         res = await self.session.execute(
@@ -71,7 +71,7 @@ class AppointmentRepository:
                 :p_sales_agent_id,
                 :p_scheduled_at,
                 :p_duration_minutes,
-                :p_source::public.appointment_source,
+                CAST(:p_source AS public.appointment_source),
                 :p_related_call_id,
                 :p_notes,
                 :p_created_by
@@ -135,7 +135,7 @@ class AppointmentRepository:
             params["tenant_id"] = tenant_id
 
         if "status" in data_dict:
-            set_clauses.append("status = :val_status::public.appointment_status")
+            set_clauses.append("status = CAST(:val_status AS public.appointment_status)")
             params["val_status"] = data_dict.pop("status")
 
             val_status = params["val_status"]
@@ -234,7 +234,7 @@ class AppointmentRepository:
             params["filter_project_id"] = filters.project_id
 
         if filters.status:
-            where_conditions.append("status = :filter_status::public.appointment_status")
+            where_conditions.append("status = CAST(:filter_status AS public.appointment_status)")
             params["filter_status"] = filters.status
 
         if filters.start_date:

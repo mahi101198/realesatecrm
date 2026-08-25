@@ -8,6 +8,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.repository import AgentRepository
+from app.agent.tools.call_tools import (
+    make_instant_call,
+    make_instant_call_tool,
+    schedule_call,
+    schedule_call_tool,
+)
 from app.agent.tools.read_tools import (
     check_site_visit_availability_tool,
     get_lead_context_tool,
@@ -64,6 +70,10 @@ TOOL_REGISTRY: dict[str, AgentTool] = {
     "create_sales_callback": create_sales_callback_tool,
     "record_lead_property_interest": record_lead_property_interest_tool,
     "update_lead_score": update_lead_score_tool,
+    # Call actions (foundation layer): make_instant_call is the single code
+    # path that places a call; schedule_call only persists a call_jobs row.
+    "make_instant_call": make_instant_call_tool,
+    "schedule_call": schedule_call_tool,
 }
 
 # Tool Classification: READ vs WRITE
@@ -88,7 +98,8 @@ async def dispatch_agent_tool(
     arguments: dict[str, Any],
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """Dynamically dispatch tool call to registered tool handler with idempotency and audit logging."""
+    """Dynamically dispatch tool call to registered tool handler with
+    idempotency and audit logging."""
     handler = TOOL_REGISTRY.get(tool_name)
     if not handler:
         return {
@@ -104,7 +115,10 @@ async def dispatch_agent_tool(
     if idempotency_key and tool_name in WRITE_TOOLS and tenant_id:
         cached = await repo.get_idempotent_response(tenant_id, idempotency_key, tool_name)
         if cached is not None:
-            logger.info(f"Returning cached idempotent response for tool '{tool_name}' key '{idempotency_key}'")
+            logger.info(
+                f"Returning cached idempotent response for tool '{tool_name}' "
+                f"key '{idempotency_key}'"
+            )
             return cached
 
     # 2. Execute Handler
@@ -116,14 +130,23 @@ async def dispatch_agent_tool(
             await repo.save_idempotent_response(tenant_id, idempotency_key, tool_name, result)
 
         # 4. Audit Log for WRITE tools
+        #
+        # BUGFIX: this INSERT previously named columns public.activities does
+        # not have (user_id / entity_type / entity_id -- see migration 009), so
+        # it raised every single time and was silently swallowed by the except
+        # below. No AI tool execution was ever actually audited. The column
+        # list now matches the real table, which is also what feeds the
+        # "prior AI actions" section of a sales handoff's context bundle.
         if tool_name in WRITE_TOOLS and tenant_id:
             try:
                 audit_sql = text(
                     """
                     INSERT INTO public.activities (
-                        tenant_id, user_id, activity_type, entity_type, entity_id, description, metadata
+                        tenant_id, lead_id, customer_id, activity_type,
+                        actor_type, actor_id, title, description, metadata
                     ) VALUES (
-                        :tenant_id, :user_id, 'ai_tool_execution', :tool_name, :lead_id, :description, :metadata
+                        :tenant_id, :lead_id, :customer_id, 'ai_tool_execution',
+                        'ai_agent', :actor_id, :title, :description, :metadata
                     )
                     """
                 )
@@ -131,15 +154,18 @@ async def dispatch_agent_tool(
                     audit_sql,
                     {
                         "tenant_id": tenant_id,
-                        "user_id": context.user_id,
-                        "tool_name": tool_name,
                         "lead_id": arguments.get("lead_id"),
+                        "customer_id": arguments.get("customer_id"),
+                        "actor_id": context.user_id,
+                        "title": tool_name,
                         "description": f"AI Agent executed write tool {tool_name}",
-                        "metadata": '{"source": "ai_agent"}',
+                        "metadata": {"source": "ai_agent", "tool": tool_name},
                     },
                 )
             except Exception as audit_err:
-                logger.warning(f"Failed to record audit activity for tool '{tool_name}': {audit_err!s}")
+                logger.warning(
+                    f"Failed to record audit activity for tool '{tool_name}': {audit_err!s}"
+                )
 
         return result
     except TypeError as e:
@@ -185,4 +211,8 @@ __all__ = [
     "create_sales_callback_tool",
     "record_lead_property_interest_tool",
     "update_lead_score_tool",
+    "make_instant_call",
+    "make_instant_call_tool",
+    "schedule_call",
+    "schedule_call_tool",
 ]

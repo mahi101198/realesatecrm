@@ -3,6 +3,7 @@ before any DB write), malformed-payload handling (clean error, not a 500),
 and that the answer endpoint always returns valid Stream JSON."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 
@@ -79,18 +80,28 @@ async def test_sfvopi_answer_webhook_rejects_invalid_token_before_db_write() -> 
 
 @pytest.mark.asyncio
 async def test_crm_event_webhook_rejects_invalid_bearer_before_db_write() -> None:
-    """Verify a missing/invalid Authorization header is rejected before any DB write."""
+    """Verify a missing/invalid Authorization header is rejected before the
+    payload is ever parsed or any event-processing DB write happens."""
     request = _fake_request(json_body={"cdr_uuid": "x"})
     session = AsyncMock()
+    tenant_id = uuid4()
 
-    with patch(
-        "app.webhooks.superfone.router.verify_superfone_crm_bearer",
-        side_effect=UnauthorizedError(
-            message="bad bearer", code="SUPERFONE_CRM_WEBHOOK_INVALID_TOKEN"
+    with (
+        patch(
+            "app.webhooks.superfone.router.SuperfoneCrmTenantConfigRepository"
+        ) as mock_repo_cls,
+        patch(
+            "app.webhooks.superfone.router.verify_superfone_crm_bearer",
+            side_effect=UnauthorizedError(
+                message="bad bearer", code="SUPERFONE_CRM_WEBHOOK_INVALID_TOKEN"
+            ),
         ),
-    ), pytest.raises(UnauthorizedError):
-        await superfone_crm_event_webhook("ALL_CALLS", request, session=session)
+    ):
+        mock_repo_cls.return_value.get_secret_hash = AsyncMock(return_value="some-hash")
+        with pytest.raises(UnauthorizedError):
+            await superfone_crm_event_webhook(tenant_id, "ALL_CALLS", request, session=session)
 
+    request.json.assert_not_called()  # auth is checked before we even parse the body
     session.execute.assert_not_called()
 
 

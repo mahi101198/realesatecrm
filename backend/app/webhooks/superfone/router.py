@@ -9,6 +9,7 @@ malformed body is caught explicitly and turned into a clean 4xx, never a 500.
 
 import logging
 from typing import Annotated, Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import JSONResponse
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ValidationError
 from app.db.session import get_db_session
+from app.webhooks.superfone.repository import SuperfoneCrmTenantConfigRepository
 from app.webhooks.superfone.security import (
     verify_sfvopi_webhook_token,
     verify_superfone_crm_bearer,
@@ -73,7 +75,10 @@ async def sfvopi_answer_webhook(
     payload = await _read_json_body(request)
 
     service = SuperfoneWebhookService(session)
-    stream_response = service.build_stream_response()
+    # The payload carries request_uuid/call_uuid; passing it lets the Stream URL
+    # name the call, which is how app/voice/router.py correlates the media
+    # socket back to a call job. Still built before any DB work touches it.
+    stream_response = service.build_stream_response(payload)
 
     try:
         await service.handle_sfvopi_answer(payload)
@@ -148,32 +153,39 @@ async def sfvopi_hangup_webhook(
 
 
 @router.post(
-    "/crm/events/{event_type}",
+    "/crm/{tenant_id}/events/{event_type}",
     status_code=status.HTTP_200_OK,
     summary="Superfone CRM Event Notification",
     description=(
         "Dashboard-configured CRM event notification (ALL_CALLS/MISSED_CALL/"
-        "CDR_RECORDING_AVAILABLE/CDR_SUMMARY_READY). event_type is a path "
-        "segment we choose per automation when configuring it in Superfone's "
-        "dashboard, since the payload shape varies per event and isn't "
-        "guaranteed to self-describe its type. Authorization: Bearer required."
+        "CDR_RECORDING_AVAILABLE/CDR_SUMMARY_READY). Routes by tenant_id in "
+        "the URL, same as the WhatsApp webhook -- each tenant registers this "
+        "URL and its own bearer secret in its own Superfone dashboard "
+        "automation. event_type is a path segment we choose per automation "
+        "when configuring it, since the payload shape varies per event and "
+        "isn't guaranteed to self-describe its type. Authorization: Bearer required."
     ),
 )
 async def superfone_crm_event_webhook(
+    tenant_id: UUID,
     event_type: str,
     request: Request,
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, str]:
     """Superfone CRM event-notification webhook -- ack only."""
-    verify_superfone_crm_bearer(request.headers.get("authorization"))
+    config_repo = SuperfoneCrmTenantConfigRepository(session)
+    secret_hash = await config_repo.get_secret_hash(tenant_id)
+    verify_superfone_crm_bearer(request.headers.get("authorization"), secret_hash)
     payload = await _read_json_body(request)
 
     service = SuperfoneWebhookService(session)
     try:
-        await service.handle_crm_event(event_type, payload)
+        await service.handle_crm_event(tenant_id, event_type, payload)
         await session.commit()
     except Exception as e:
-        logger.error(f"Error processing Superfone CRM event '{event_type}': {e!s}")
+        logger.error(
+            f"Error processing Superfone CRM event '{event_type}' for tenant {tenant_id}: {e!s}"
+        )
         await session.rollback()
 
     return {"status": "ok"}

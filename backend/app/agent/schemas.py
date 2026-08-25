@@ -229,7 +229,10 @@ class CallCompleteInput(BaseModel):
 
     call_job_id: UUID
     call_attempt_id: UUID
-    outcome: str  # connected, no_answer, busy, rejected, wrong_number, customer_requested_callback, customer_not_interested, site_visit_scheduled, human_transfer, technical_failure
+    # connected, no_answer, busy, rejected, wrong_number,
+    # customer_requested_callback, customer_not_interested,
+    # site_visit_scheduled, human_transfer, technical_failure
+    outcome: str
     duration_seconds: int | None = None
     call_summary: str | None = None
     provider_call_id: str | None = None

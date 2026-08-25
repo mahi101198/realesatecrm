@@ -39,11 +39,13 @@ class LeadRepository:
                 metadata, created_by
             ) VALUES (
                 :tenant_id, :customer_id, :lead_source_id, :campaign_id,
-                :property_type_id, :purpose::public.purpose, :preferred_city, :preferred_locality,
-                :budget_min, :budget_max, :area_min, :area_max, :area_unit::public.area_unit,
-                :bedrooms, :timeline, :finance_requirement::public.finance_requirement,
-                :status::public.lead_status, :sales_stage::public.sales_stage,
-                :lead_score, :interest_level::public.interest_level,
+                :property_type_id, CAST(:purpose AS public.purpose),
+                :preferred_city, :preferred_locality,
+                :budget_min, :budget_max, :area_min, :area_max,
+                CAST(:area_unit AS public.area_unit),
+                :bedrooms, :timeline, CAST(:finance_requirement AS public.finance_requirement),
+                CAST(:status AS public.lead_status), CAST(:sales_stage AS public.sales_stage),
+                :lead_score, CAST(:interest_level AS public.interest_level),
                 :assigned_sales_agent_id, :notes,
                 :metadata, :created_by
             )
@@ -172,11 +174,11 @@ class LeadRepository:
             params["filter_customer_id"] = filters.customer_id
 
         if filters.status:
-            where_conditions.append("status = :filter_status::public.lead_status")
+            where_conditions.append("status = CAST(:filter_status AS public.lead_status)")
             params["filter_status"] = filters.status
 
         if filters.sales_stage:
-            where_conditions.append("sales_stage = :filter_sales_stage::public.sales_stage")
+            where_conditions.append("sales_stage = CAST(:filter_sales_stage AS public.sales_stage)")
             params["filter_sales_stage"] = filters.sales_stage
 
         if filters.assigned_sales_agent_id:
@@ -304,7 +306,7 @@ class LeadRepository:
                 interest_level, is_primary, notes
             ) VALUES (
                 :tenant_id, :lead_id, :project_id, :property_id,
-                :interest_level::public.interest_level, :is_primary, :notes
+                CAST(:interest_level AS public.interest_level), :is_primary, :notes
             )
             ON CONFLICT (lead_id, project_id, property_id) DO UPDATE SET
                 interest_level = EXCLUDED.interest_level,

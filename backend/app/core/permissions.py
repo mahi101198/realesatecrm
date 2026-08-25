@@ -123,6 +123,7 @@ class Permission(StrEnum):
     PLATFORM_BILLING_READ = "platform.billing.read"
     PLATFORM_ANALYTICS_READ = "platform.analytics.read"
     PLATFORM_WHATSAPP_CONFIG_MANAGE = "platform.whatsapp_config.manage"
+    PLATFORM_SUPERFONE_CRM_CONFIG_MANAGE = "platform.superfone_crm_config.manage"
 
 
 def permission_code(permission: Permission | str) -> str:

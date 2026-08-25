@@ -99,3 +99,24 @@ class WhatsAppConfigResponse(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: datetime
+
+
+class SuperfoneCrmConfigUpsertRequest(BaseModel):
+    """Request payload to create/rotate a tenant's Superfone CRM webhook
+    bearer secret. The caller generates the secret value itself (same as
+    rotating any bearer credential) -- this backend only ever hashes and
+    stores it, never generates or echoes it back."""
+
+    bearer_secret: str = Field(..., min_length=16)
+
+
+class SuperfoneCrmConfigResponse(BaseModel):
+    """Tenant Superfone CRM webhook config metadata -- deliberately excludes
+    the bearer secret (and even its hash). Never add them here."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    tenant_id: UUID
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime

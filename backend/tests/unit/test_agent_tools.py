@@ -30,8 +30,9 @@ def _context_with_permissions(
 
 
 @pytest.mark.asyncio
-async def test_tool_registry_has_all_22_tools() -> None:
-    """Verify registry contains all 22 required AI agent tools."""
+async def test_tool_registry_has_all_expected_tools() -> None:
+    """Verify the registry contains the original 22 AI agent tools plus the
+    two call-action tools added by the deterministic foundation layer."""
     expected_tools = {
         "get_lead_context",
         "get_recent_call_summary",
@@ -55,6 +56,8 @@ async def test_tool_registry_has_all_22_tools() -> None:
         "create_sales_callback",
         "record_lead_property_interest",
         "update_lead_score",
+        "make_instant_call",
+        "schedule_call",
     }
     assert set(TOOL_REGISTRY.keys()) == expected_tools
 

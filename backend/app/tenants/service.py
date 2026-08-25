@@ -9,11 +9,14 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.integrations.whatsapp.repository import WhatsAppTenantConfigRepository
 from app.tenants.repository import TenantRepository
 from app.tenants.schemas import (
+    SuperfoneCrmConfigResponse,
+    SuperfoneCrmConfigUpsertRequest,
     TenantResponse,
     TenantUpdate,
     WhatsAppConfigResponse,
     WhatsAppConfigUpsertRequest,
 )
+from app.webhooks.superfone.repository import SuperfoneCrmTenantConfigRepository
 
 logger = logging.getLogger(__name__)
 
@@ -106,3 +109,28 @@ class TenantService:
                 code="WHATSAPP_NOT_CONFIGURED",
             )
         return WhatsAppConfigResponse.model_validate(row)
+
+    async def upsert_superfone_crm_config(
+        self, tenant_id: UUID, data: SuperfoneCrmConfigUpsertRequest
+    ) -> SuperfoneCrmConfigResponse:
+        """Create or rotate a tenant's Superfone CRM webhook bearer secret."""
+        existing = await self.repository.get_by_id(tenant_id)
+        if not existing:
+            raise NotFoundError(
+                message=f"Tenant with ID '{tenant_id}' was not found.", code="TENANT_NOT_FOUND"
+            )
+        crm_repo = SuperfoneCrmTenantConfigRepository(self.repository.session)
+        row = await crm_repo.upsert(tenant_id, data.bearer_secret)
+        return SuperfoneCrmConfigResponse.model_validate(row)
+
+    async def get_superfone_crm_config(self, tenant_id: UUID) -> SuperfoneCrmConfigResponse:
+        """Fetch a tenant's Superfone CRM webhook config metadata (never
+        the secret or its hash)."""
+        crm_repo = SuperfoneCrmTenantConfigRepository(self.repository.session)
+        row = await crm_repo.get_public(tenant_id)
+        if not row:
+            raise NotFoundError(
+                message=f"Tenant '{tenant_id}' has no Superfone CRM webhook configuration.",
+                code="SUPERFONE_CRM_NOT_CONFIGURED",
+            )
+        return SuperfoneCrmConfigResponse.model_validate(row)

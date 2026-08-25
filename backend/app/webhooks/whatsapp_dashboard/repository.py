@@ -1,11 +1,13 @@
 """Repository for the whatsapp-dashboard call-agent trigger: cross-tenant
-phone lookup (the one legitimate remaining use, since the caller supplies
-no tenant) and lead resolution/auto-create (call_jobs.lead_id is NOT NULL,
-so a lead is mandatory before a call_job can be created)."""
+phone lookup only -- the one legitimate remaining use of an untenanted
+customers query, since this caller supplies no tenant at all.
+
+Lead resolution moved to app/leads/resolver.py::LeadResolver (call_jobs.lead_id
+is NOT NULL, so a lead is still mandatory before a call_job can be created --
+the service resolves one there)."""
 
 import logging
 from typing import Any
-from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,34 +37,8 @@ class CallAgentTriggerRepository:
             return None
         return dict(rows[0])
 
-    async def get_or_create_lead(self, tenant_id: UUID, customer_id: UUID) -> dict[str, Any]:
-        """Fetch the customer's most recent lead, or auto-create a minimal
-        one. call_jobs.lead_id is NOT NULL, so this is mandatory before
-        queuing/placing a call."""
-        result = await self.session.execute(
-            text(
-                """
-                SELECT * FROM public.leads
-                WHERE tenant_id = :tenant_id AND customer_id = :customer_id
-                  AND deleted_at IS NULL
-                ORDER BY created_at DESC
-                LIMIT 1
-                """
-            ),
-            {"tenant_id": tenant_id, "customer_id": customer_id},
-        )
-        row = result.mappings().one_or_none()
-        if row:
-            return dict(row)
-
-        insert_result = await self.session.execute(
-            text(
-                """
-                INSERT INTO public.leads (tenant_id, customer_id)
-                VALUES (:tenant_id, :customer_id)
-                RETURNING *
-                """
-            ),
-            {"tenant_id": tenant_id, "customer_id": customer_id},
-        )
-        return dict(insert_result.mappings().one())
+    # NOTE: get_or_create_lead used to live here. It was one of three copies of
+    # the same "most recent lead, else create" rule; lead resolution is now the
+    # single deterministic path in app/leads/resolver.py::LeadResolver, which
+    # additionally excludes closed leads (converted/lost/do_not_contact) rather
+    # than reviving one to hang a new call off.

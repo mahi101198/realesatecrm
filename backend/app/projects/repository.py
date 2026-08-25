@@ -41,10 +41,10 @@ class ProjectRepository:
                 :address_line1, :address_line2, :locality, :city, :district, :state,
                 :country, :pincode, :latitude, :longitude,
                 :launch_date, :possession_date, :completion_date,
-                :status::public.project_status, :is_featured, :is_public,
+                CAST(:status AS public.project_status), :is_featured, :is_public,
                 :price_min, :price_max, :currency,
                 :total_units, :available_units, :project_area,
-                :project_area_unit::public.area_unit,
+                CAST(:project_area_unit AS public.area_unit),
                 :metadata, :created_by
             )
             RETURNING *
@@ -179,7 +179,7 @@ class ProjectRepository:
             params["filter_city"] = f"%{filters.city.strip()}%"
 
         if filters.status:
-            where_conditions.append("status = :filter_status::public.project_status")
+            where_conditions.append("status = CAST(:filter_status AS public.project_status)")
             params["filter_status"] = filters.status
 
         if filters.project_type_id:
