@@ -21,6 +21,7 @@ from app.leads.schemas import (
     LeadPropertyInterestResponse,
     LeadResponse,
     LeadUpdate,
+    SalesAgentResponse,
 )
 from app.leads.service import LeadService
 from app.shared.schemas import PaginatedResponse, PaginationParams
@@ -46,6 +47,29 @@ async def create_lead(
         raise ValueError("Tenant scope is required to create a lead.")
     service = LeadService(session)
     return await service.create_lead(tenant_id, context.user_id, data)
+
+
+@router.get(
+    "/sales-agents",
+    response_model=list[SalesAgentResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List Assignable Sales Agents",
+    description=(
+        "List active sales agents assignable to leads in the caller's tenant. "
+        "Registered before /{lead_id} so 'sales-agents' is never mistaken for a "
+        "lead_id. The `id` returned here is a sales_agents.id -- NOT a staff "
+        "user's id -- and is exactly what POST /leads/{lead_id}/assign expects."
+    ),
+)
+async def list_lead_sales_agents(
+    context: RequestContext = Depends(require_permission(Permission.LEAD_ASSIGN)),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[SalesAgentResponse]:
+    """List assignable sales agents endpoint."""
+    tenant_id = resolve_tenant_scope(context)
+    if tenant_id is None:
+        raise ValueError("Tenant scope is required.")
+    return await LeadService(session).list_sales_agents(tenant_id)
 
 
 @router.get(

@@ -263,6 +263,46 @@ async def test_a_failed_room_creation_stops_before_any_audio(
     websocket.receive.assert_not_awaited()
 
 
+async def test_run_speaks_the_opening_line_through_agent_session_say(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: conversation.open() only computes and records the
+    greeting to the transcript -- it never touches TTS on its own. Without
+    pushing it through AgentSession.say(), a live customer hears silence
+    instead of the agent's opening line."""
+    context = _context()
+    conversation = AsyncMock()
+    conversation.open = AsyncMock(return_value="Hello, this is calling about your enquiry.")
+
+    mock_agent_session = MagicMock()
+    mock_agent_session.start = AsyncMock()
+    mock_agent_session.say = MagicMock()
+    mock_agent_session.aclose = AsyncMock()
+    monkeypatch.setattr(
+        "app.voice.service.pipeline.build_agent", MagicMock(return_value=MagicMock())
+    )
+    monkeypatch.setattr(
+        "app.voice.service.pipeline.build_session", MagicMock(return_value=mock_agent_session)
+    )
+
+    mock_room = MagicMock()
+    mock_room.connect = AsyncMock()
+    mock_room.disconnect = AsyncMock()
+    monkeypatch.setattr("livekit.rtc.Room", MagicMock(return_value=mock_room))
+    monkeypatch.setattr(
+        "app.voice.service.livekit_gateway.build_access_token", MagicMock(return_value="token")
+    )
+
+    bridge = AsyncMock()
+
+    service = VoiceService(AsyncMock())
+    await service._run(bridge, conversation, context, "room-1")
+
+    conversation.open.assert_awaited_once()
+    mock_agent_session.say.assert_called_once_with("Hello, this is calling about your enquiry.")
+    bridge.pump_inbound.assert_awaited_once()
+
+
 async def test_preflight_reports_the_first_blocking_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

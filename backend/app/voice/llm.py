@@ -56,6 +56,7 @@ FAIL CLOSED
     the first spoken turn.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -208,6 +209,25 @@ def _parse_tool_arguments(name: str, raw: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+async def _run_one_tool(tool_executor: Any, call: Any) -> tuple[dict[str, Any], bool]:
+    """Run one tool call, normalising a raised exception into an error payload.
+
+    Split out of the loop so `call_with_tools` can `asyncio.gather` several of
+    these at once: each one is fully self-contained (parses its own
+    arguments, catches its own failure), so nothing here depends on execution
+    order relative to any other call in the same round.
+    """
+    arguments = _parse_tool_arguments(call.name, call.arguments)
+    try:
+        payload = await tool_executor(call.name, arguments)
+        is_error = not bool(payload.get("success", True))
+    except Exception as exc:  # noqa: BLE001 -- surfaced to the model, not raised
+        logger.warning(f"Voice AI tool {call.name!r} raised: {exc!s}")
+        payload = {"success": False, "message": "Tool execution failed."}
+        is_error = True
+    return payload, is_error
+
+
 async def call_with_tools(
     *,
     system: str,
@@ -258,15 +278,17 @@ async def call_with_tools(
                 )
             )
 
-        for call in response.tool_calls:
-            arguments = _parse_tool_arguments(call.name, call.arguments)
-            try:
-                payload = await tool_executor(call.name, arguments)
-                is_error = not bool(payload.get("success", True))
-            except Exception as exc:  # noqa: BLE001 -- surfaced to the model, not raised
-                logger.warning(f"Voice AI tool {call.name!r} raised: {exc!s}")
-                payload = {"success": False, "message": "Tool execution failed."}
-                is_error = True
+        # Concurrent, not sequential: a turn where the model asks for two
+        # independent lookups (e.g. a property AND its project) used to pay
+        # for both round trips back-to-back, purely because this loop awaited
+        # them one at a time. `tool_executor` (VoiceAgent._execute_tool) opens
+        # its own short-lived DB session per call precisely so this gather is
+        # safe -- see that method's docstring for why a shared AsyncSession
+        # could not support this.
+        results = await asyncio.gather(
+            *(_run_one_tool(tool_executor, call) for call in response.tool_calls)
+        )
+        for call, (payload, is_error) in zip(response.tool_calls, results, strict=True):
             chat_ctx.insert(
                 lk_llm.FunctionCallOutput(
                     call_id=call.call_id,

@@ -54,6 +54,22 @@ class PropertySaleResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # ── Joined human-readable display fields ────────────────────────────────
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    customer_email: str | None = None
+    customer_city: str | None = None
+    project_name: str | None = None
+    project_locality: str | None = None
+    project_city: str | None = None
+    property_code: str | None = None
+    unit_number: str | None = None
+    property_bedrooms: int | None = None
+    property_built_up_area: Decimal | None = None
+    amount_received: Decimal | None = None
+    outstanding_balance: Decimal | None = None
+    created_by_name: str | None = None
+
 
 class PropertySaleFilter(BaseModel):
     """Filter parameters for listing property sales."""

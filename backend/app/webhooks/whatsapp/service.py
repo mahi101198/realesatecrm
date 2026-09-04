@@ -279,7 +279,7 @@ class WhatsAppWebhookService:
         if not settings.AI_ORCHESTRATOR_ENABLED or not is_llm_configured():
             logger.debug(
                 "AI orchestrator skipped for inbound WhatsApp message "
-                "(disabled or no ANTHROPIC_API_KEY configured)."
+                "(disabled or no GEMINI_API_KEY configured)."
             )
             return
         if not (text or "").strip():

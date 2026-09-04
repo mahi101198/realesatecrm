@@ -256,15 +256,31 @@ async def build_voice_call_context(
     Every read is tenant-scoped by `correlation.tenant_id`. Missing pieces come
     back as None rather than raising: an agent that knows less is still a usable
     agent, whereas a briefing that throws would drop a live call.
+
+    PREFERS THE STORED SNAPSHOT OVER RECOMPUTING IT LIVE. `AgentGateway.
+    prepare_call` already ran this exact six-query aggregation
+    (`get_pre_call_context`) and persisted the result to `agent_call_contexts`
+    BEFORE the phone was dialed -- there was no customer waiting yet. Running
+    it again here re-pays that cost at the one moment that matters most: the
+    customer has just picked up and is waiting to hear the agent's greeting.
+    Falling back to the live aggregation (only) when no snapshot exists keeps
+    this correct for paths that skip `prepare_call`, such as the browser test
+    harness in `test_service.py`.
     """
+    repository = AgentRepository(session)
     snapshot: dict[str, Any] = {}
     if correlation.lead_id is not None:
-        repository = AgentRepository(session)
-        pre_call = await repository.get_pre_call_context(
-            correlation.tenant_id, correlation.lead_id
+        stored = await repository.get_latest_call_context_snapshot(
+            correlation.tenant_id, correlation.call_job_id
         )
-        if pre_call is not None:
-            snapshot = pre_call.model_dump(mode="json")
+        if stored is not None:
+            snapshot = stored
+        else:
+            pre_call = await repository.get_pre_call_context(
+                correlation.tenant_id, correlation.lead_id
+            )
+            if pre_call is not None:
+                snapshot = pre_call.model_dump(mode="json")
 
     customer = snapshot.get("customer") or {}
     summary = await load_conversation_summary(

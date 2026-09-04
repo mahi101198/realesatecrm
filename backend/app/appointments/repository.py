@@ -214,48 +214,76 @@ class AppointmentRepository:
         }
 
         if tenant_id is not None:
-            where_conditions.append("tenant_id = :tenant_id")
+            where_conditions.append("a.tenant_id = :tenant_id")
             params["tenant_id"] = tenant_id
 
         if filters.customer_id:
-            where_conditions.append("customer_id = :filter_customer_id")
+            where_conditions.append("a.customer_id = :filter_customer_id")
             params["filter_customer_id"] = filters.customer_id
 
         if filters.lead_id:
-            where_conditions.append("lead_id = :filter_lead_id")
+            where_conditions.append("a.lead_id = :filter_lead_id")
             params["filter_lead_id"] = filters.lead_id
 
         if filters.sales_agent_id:
-            where_conditions.append("sales_agent_id = :filter_agent_id")
+            where_conditions.append("a.sales_agent_id = :filter_agent_id")
             params["filter_agent_id"] = filters.sales_agent_id
 
         if filters.project_id:
-            where_conditions.append("project_id = :filter_project_id")
+            where_conditions.append("a.project_id = :filter_project_id")
             params["filter_project_id"] = filters.project_id
 
         if filters.status:
-            where_conditions.append("status = CAST(:filter_status AS public.appointment_status)")
+            where_conditions.append("a.status = CAST(:filter_status AS public.appointment_status)")
             params["filter_status"] = filters.status
 
         if filters.start_date:
-            where_conditions.append("scheduled_at >= :start_date")
+            where_conditions.append("a.scheduled_at >= :start_date")
             params["start_date"] = filters.start_date
 
         if filters.end_date:
-            where_conditions.append("scheduled_at <= :end_date")
+            where_conditions.append("a.scheduled_at <= :end_date")
             params["end_date"] = filters.end_date
 
         where_str = " AND ".join(where_conditions)
 
-        count_query = text(f"SELECT COUNT(*) FROM public.appointments WHERE {where_str}")  # noqa: S608
+        count_query = text(f"SELECT COUNT(*) FROM public.appointments a WHERE {where_str}")  # noqa: S608
         count_result = await self.session.execute(count_query, params)
         total_count = count_result.scalar_one()
 
         select_query = text(
             f"""
-            SELECT * FROM public.appointments
+            SELECT
+                a.*,
+                c.full_name       AS customer_name,
+                c.phone           AS customer_phone,
+                c.email           AS customer_email,
+                c.city            AS customer_city,
+                pr.name           AS project_name,
+                pr.locality       AS project_locality,
+                pr.city           AS project_city,
+                pr.address_line1  AS project_address,
+                p.property_code   AS property_code,
+                p.unit_number     AS unit_number,
+                p.bedrooms        AS property_bedrooms,
+                p.base_price::text AS property_base_price,
+                l.lead_number     AS lead_number,
+                l.sales_stage::text AS lead_sales_stage,
+                l.budget_min::text  AS lead_budget_min,
+                l.budget_max::text  AS lead_budget_max,
+                u.name            AS sales_agent_name,
+                u.phone           AS sales_agent_phone,
+                creator.name      AS created_by_name
+            FROM public.appointments a
+            LEFT JOIN public.customers c    ON c.id = a.customer_id
+            LEFT JOIN public.projects pr    ON pr.id = a.project_id
+            LEFT JOIN public.properties p   ON p.id = a.property_id
+            LEFT JOIN public.leads l        ON l.id = a.lead_id
+            LEFT JOIN public.sales_agents sa ON sa.id = a.sales_agent_id
+            LEFT JOIN public.users u        ON u.id = COALESCE(sa.user_id, a.sales_agent_id)
+            LEFT JOIN public.users creator  ON creator.id = a.created_by
             WHERE {where_str}
-            ORDER BY scheduled_at ASC
+            ORDER BY a.scheduled_at ASC
             LIMIT :limit OFFSET :offset
             """  # noqa: S608
         )

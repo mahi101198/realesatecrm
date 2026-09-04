@@ -65,3 +65,16 @@ class RoleAssignRequest(BaseModel):
     expires_at: datetime | None = Field(
         default=None, description="Optional time-limited grant expiry"
     )
+
+
+class RoleResponse(BaseModel):
+    """A role assignable within the caller's tenant: every system role
+    (tenant_id IS NULL) plus any custom roles belonging to this tenant."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    display_name: str
+    description: str | None = None
+    is_system_role: bool

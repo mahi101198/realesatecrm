@@ -253,8 +253,8 @@ class WhatsAppRepository:
         filters: WhatsAppMessageFilter,
         pagination: PaginationParams,
     ) -> tuple[list[dict[str, Any]], int]:
-        """List/filter WhatsApp messages for a tenant."""
-        where_conditions = ["tenant_id = :tenant_id"]
+        """List/filter WhatsApp messages for a tenant with customer and lead details."""
+        where_conditions = ["wm.tenant_id = :tenant_id"]
         params: dict[str, Any] = {
             "tenant_id": tenant_id,
             "limit": pagination.page_size,
@@ -262,25 +262,25 @@ class WhatsAppRepository:
         }
 
         if filters.customer_id:
-            where_conditions.append("customer_id = :filter_customer_id")
+            where_conditions.append("wm.customer_id = :filter_customer_id")
             params["filter_customer_id"] = filters.customer_id
         if filters.lead_id:
-            where_conditions.append("lead_id = :filter_lead_id")
+            where_conditions.append("wm.lead_id = :filter_lead_id")
             params["filter_lead_id"] = filters.lead_id
         if filters.direction:
             where_conditions.append(
-                "direction = CAST(:filter_direction AS public.message_direction)"
+                "wm.direction = CAST(:filter_direction AS public.message_direction)"
             )
             params["filter_direction"] = filters.direction
         if filters.status:
             where_conditions.append(
-                "status = CAST(:filter_status AS public.whatsapp_message_status)"
+                "wm.status = CAST(:filter_status AS public.whatsapp_message_status)"
             )
             params["filter_status"] = filters.status
 
         where_str = " AND ".join(where_conditions)
         count_result = await self.session.execute(
-            text(f"SELECT COUNT(*) FROM public.whatsapp_messages WHERE {where_str}"),  # noqa: S608
+            text(f"SELECT COUNT(*) FROM public.whatsapp_messages wm WHERE {where_str}"),  # noqa: S608
             params,
         )
         total = count_result.scalar_one()
@@ -288,9 +288,19 @@ class WhatsAppRepository:
         select_result = await self.session.execute(
             text(
                 f"""
-                SELECT * FROM public.whatsapp_messages
+                SELECT
+                    wm.*,
+                    c.full_name     AS customer_name,
+                    c.phone         AS customer_phone,
+                    c.email         AS customer_email,
+                    c.city          AS customer_city,
+                    l.lead_number   AS lead_number,
+                    l.status::text  AS lead_status
+                FROM public.whatsapp_messages wm
+                LEFT JOIN public.customers c ON c.id = wm.customer_id
+                LEFT JOIN public.leads l ON l.id = wm.lead_id
                 WHERE {where_str}
-                ORDER BY created_at DESC
+                ORDER BY wm.created_at DESC
                 LIMIT :limit OFFSET :offset
                 """  # noqa: S608
             ),

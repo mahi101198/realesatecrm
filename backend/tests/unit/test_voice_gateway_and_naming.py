@@ -136,16 +136,18 @@ def test_livekit_without_a_voice_model_is_still_disabled(
     assert "VOICE_LLM_MODEL" in (voice_disabled_reason() or "")
 
 
-def test_an_absent_anthropic_key_does_not_disable_voice(
+def test_an_absent_gemini_key_does_not_disable_voice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Voice moved off the shared Anthropic seam; the gate must have moved too."""
+    """Voice reasons through LiveKit Inference, not the direct Gemini seam
+    (app/agents/llm.py) the WhatsApp agent/orchestrator use; the gate must not
+    depend on it."""
     monkeypatch.setattr(settings, "LIVEKIT_URL", "wss://x.livekit.cloud", raising=False)
     monkeypatch.setattr(settings, "LIVEKIT_API_KEY", SecretStr("k"), raising=False)
     monkeypatch.setattr(settings, "LIVEKIT_API_SECRET", SecretStr("s"), raising=False)
     monkeypatch.setattr(settings, "VOICE_AGENT_ENABLED", True, raising=False)
     monkeypatch.setattr(settings, "VOICE_LLM_MODEL", "vendor/model", raising=False)
-    monkeypatch.setattr(settings, "ANTHROPIC_API_KEY", SecretStr(""), raising=False)
+    monkeypatch.setattr(settings, "GEMINI_API_KEY", SecretStr(""), raising=False)
 
     assert is_voice_agent_enabled() is True
 

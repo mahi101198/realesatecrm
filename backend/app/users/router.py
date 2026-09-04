@@ -19,7 +19,13 @@ from app.core.request_context import RequestContext
 from app.db.session import get_db_session
 from app.shared.schemas import PaginatedResponse, PaginationParams
 from app.users.repository import UserAdminRepository
-from app.users.schemas import RoleAssignRequest, UserFilter, UserResponse, UserRoleResponse
+from app.users.schemas import (
+    RoleAssignRequest,
+    RoleResponse,
+    UserFilter,
+    UserResponse,
+    UserRoleResponse,
+)
 from app.users.service import UserAdminService
 
 router = APIRouter(prefix="/users", tags=["User & Role Admin"])
@@ -27,6 +33,28 @@ router = APIRouter(prefix="/users", tags=["User & Role Admin"])
 
 def _service(session: AsyncSession) -> UserAdminService:
     return UserAdminService(UserAdminRepository(session))
+
+
+@router.get(
+    "/roles",
+    response_model=list[RoleResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List Assignable Roles",
+    description=(
+        "List every role assignable within the caller's tenant: system roles "
+        "plus this tenant's own custom roles. Registered before /{user_id} so "
+        "'roles' is never mistaken for a user_id."
+    ),
+)
+async def list_assignable_roles(
+    context: RequestContext = Depends(require_permission(Permission.USER_READ)),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[RoleResponse]:
+    """List assignable roles endpoint."""
+    tenant_id = resolve_tenant_scope(context)
+    if tenant_id is None:
+        raise ValueError("Tenant scope is required.")
+    return await _service(session).list_assignable_roles(tenant_id)
 
 
 @router.get(

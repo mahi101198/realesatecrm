@@ -1,10 +1,9 @@
-"""The ONE seam between this application and the Anthropic Messages API.
+"""The ONE seam between this application and the Google Gemini API.
 
-Nothing else in the codebase imports `anthropic`. Two call shapes are exposed
-and both are deliberately tiny, because neither can be verified in an
-environment without a real `ANTHROPIC_API_KEY`:
+Nothing else in the codebase imports `google.genai`. Two call shapes are
+exposed and both are deliberately tiny:
 
-    call_structured(...)  -> dict   structured output via output_config.format
+    call_structured(...)  -> dict   structured output via response_json_schema
                                     (JSON-schema constrained; never free-text
                                     parsing of prose)
     call_with_tools(...)  -> str    bounded manual tool-use loop over a
@@ -24,18 +23,35 @@ trace".
 
 MODEL CHOICE
 ------------
-`settings.ANTHROPIC_MODEL` is the only knob. Thinking is left at the model
-default (adaptive on current models) and depth is controlled with
-`output_config.effort` -- the `budget_tokens` parameter is removed on current
-models and would 400. `max_tokens` caps thinking + response text together,
-which is why the default is generous relative to a two-sentence WhatsApp reply.
+`settings.GEMINI_MODEL` is the only knob.
+
+WHY NO TOOL-SCHEMA TRANSLATION LAYER (unlike `app/voice/llm.py`)
+------------------------------------------------------------------
+`app/voice/llm.py` had to translate this app's Anthropic-shaped tool schemas
+(`{name, description, input_schema}`, raw JSON Schema) into LiveKit's
+OpenAI-shaped `RawFunctionTool`s. Gemini needs no equivalent step:
+`FunctionDeclaration.parameters_json_schema` and
+`GenerateContentConfig.response_json_schema` both accept a raw JSON Schema
+dict directly -- `READ_TOOL_SCHEMAS`'s `input_schema` and this module's
+`schema` argument are handed straight through, untouched.
+
+WHY NO EXPLICIT tool_use_id / is_error PLUMBING (unlike Anthropic)
+------------------------------------------------------------------
+Anthropic correlates a tool result to its call via an explicit `tool_use_id`
+and flags failure with `is_error` on the `tool_result` block. Gemini's
+`Part.from_function_response` takes only `name` + a response dict -- there is
+no separate error flag, so a failed tool call's `{"success": False, ...}`
+payload is handed back as ordinary content and the model reads `success`
+itself, exactly like any other tool result. Correlation is positional/by-name
+within the turn rather than by an explicit id.
 """
 
 import json
 import logging
 from typing import Any
 
-from anthropic import AsyncAnthropic
+from google import genai
+from google.genai import types
 
 from app.core.config import settings
 
@@ -45,41 +61,48 @@ logger = logging.getLogger(__name__)
 # this many rounds of property lookups is not a reply, it's a runaway.
 DEFAULT_MAX_TOOL_ITERATIONS = 4
 
+# Finish reasons that mean "the model produced the text/JSON we asked for."
+# Anything else (MAX_TOKENS, SAFETY, PROHIBITED_CONTENT, RECITATION, ...) is a
+# response whose `.text` is not trustworthy content, exactly like Anthropic's
+# `stop_reason in ("refusal", "max_tokens")` check this replaces.
+_OK_FINISH_REASONS = frozenset({types.FinishReason.STOP, None})
+
 
 class LLMError(RuntimeError):
     """Base class for every failure originating in this module."""
 
 
 class LLMUnavailableError(LLMError):
-    """No usable Anthropic credentials are configured."""
+    """No usable Gemini credentials are configured."""
 
 
 class LLMResponseError(LLMError):
     """The model replied, but not in a shape this application can use."""
 
 
-_client: AsyncAnthropic | None = None
+_client: genai.Client | None = None
 
 
 def is_llm_configured() -> bool:
-    """True when an Anthropic API key is present. Callers MUST check this
+    """True when a Gemini API key is present. Callers MUST check this
     before entering any AI code path -- see the module docstring."""
-    return bool(settings.ANTHROPIC_API_KEY.get_secret_value().strip())
+    return bool(settings.GEMINI_API_KEY.get_secret_value().strip())
 
 
-def get_client() -> AsyncAnthropic:
-    """Return the process-wide async Anthropic client.
+def get_client() -> genai.Client:
+    """Return the process-wide async-capable Gemini client.
 
     Cached because the SDK client owns an HTTP connection pool; building one
-    per inbound WhatsApp message would leak sockets under load.
+    per inbound WhatsApp message would leak sockets under load. Calls go
+    through `client.aio.*`, the SDK's async namespace on this same client.
     """
     global _client
     if not is_llm_configured():
         raise LLMUnavailableError(
-            "ANTHROPIC_API_KEY is not configured; the AI layer is disabled."
+            "GEMINI_API_KEY is not configured; the AI layer is disabled."
         )
     if _client is None:
-        _client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY.get_secret_value())
+        _client = genai.Client(api_key=settings.GEMINI_API_KEY.get_secret_value())
     return _client
 
 
@@ -89,13 +112,28 @@ def reset_client() -> None:
     _client = None
 
 
-def _first_text_block(content: Any) -> str | None:
-    for block in content or []:
-        if getattr(block, "type", None) == "text":
-            text = getattr(block, "text", "") or ""
-            if text.strip():
-                return text
+def _thinking_config(effort: str) -> types.ThinkingConfig | None:
+    """Map this app's Anthropic-era `effort` dial onto Gemini's thinking level.
+
+    Only "low" is ever passed by either call site today, so only that case is
+    given a real mapping: `thinking_level=MINIMAL` fits a WhatsApp reply /
+    intent classification -- both latency-sensitive, neither needing deep
+    reasoning. Any other value leaves thinking at the model's adaptive default
+    rather than guessing a level.
+
+    NOT `thinking_budget=0`: verified live against the real API that current
+    Gemini models (gemini-3.6-flash) reject a zero thinking budget outright
+    (400 INVALID_ARGUMENT) -- `thinking_level` is the model generation's
+    replacement knob for "as little thinking as possible."
+    """
+    if effort == "low":
+        return types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL)
     return None
+
+
+def _finish_reason(response: types.GenerateContentResponse) -> Any:
+    candidates = response.candidates or []
+    return candidates[0].finish_reason if candidates else None
 
 
 async def call_structured(
@@ -108,31 +146,33 @@ async def call_structured(
 ) -> dict[str, Any]:
     """One structured-output call. Returns the parsed JSON object.
 
-    `schema` must be a JSON Schema object with `additionalProperties: false`
-    and an explicit `required` list -- structured outputs reject anything
-    looser. The response is guaranteed to be a single JSON text block, but we
-    still validate rather than trusting it: a `stop_reason` of `max_tokens` or
-    `refusal` yields a well-formed response whose text is NOT the schema.
+    `schema` is a JSON Schema object -- passed straight through to
+    `response_json_schema`, no translation (see module docstring). The
+    response is expected to be exactly one JSON object, but we still validate
+    rather than trusting it: a non-STOP `finish_reason` yields a well-formed
+    response whose text is NOT the schema (e.g. truncated by MAX_TOKENS).
     """
     client = get_client()
-    # ignore reason: see call_with_tools below -- plain dicts, not SDK TypedDicts.
-    response = await client.messages.create(  # type: ignore[call-overload]
-        model=settings.ANTHROPIC_MODEL,
-        max_tokens=max_tokens or settings.ANTHROPIC_MAX_TOKENS,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        max_output_tokens=max_tokens or settings.GEMINI_MAX_TOKENS,
+        response_mime_type="application/json",
+        response_json_schema=schema,
+        thinking_config=_thinking_config(effort),
+    )
+    response = await client.aio.models.generate_content(
+        model=settings.GEMINI_MODEL, contents=user, config=config
     )
 
-    stop_reason = getattr(response, "stop_reason", None)
-    if stop_reason in ("refusal", "max_tokens"):
+    finish_reason = _finish_reason(response)
+    if finish_reason not in _OK_FINISH_REASONS:
         raise LLMResponseError(
-            f"Structured call did not complete (stop_reason={stop_reason!r})."
+            f"Structured call did not complete (finish_reason={finish_reason!r})."
         )
 
-    text = _first_text_block(getattr(response, "content", None))
-    if text is None:
-        raise LLMResponseError("Structured call returned no text block.")
+    text = response.text
+    if not text:
+        raise LLMResponseError("Structured call returned no text.")
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -159,64 +199,81 @@ async def call_with_tools(
     never touches the database; the caller owns the tool surface and is
     responsible for keeping it read-only.
 
-    A manual loop is used rather than the SDK's beta tool runner so the
-    outbound surface stays on the stable `client.messages.create` API and the
-    iteration bound is explicit and testable.
+    Automatic function calling is explicitly disabled: the SDK can execute
+    Python callables itself, but dispatch must stay with the caller's
+    allowlisted, permission-scoped `tool_executor` -- handing the SDK a
+    callable that could actually reach a tool would create a second,
+    unguarded execution path.
     """
     client = get_client()
-    model = settings.ANTHROPIC_MODEL
-    budget = max_tokens or settings.ANTHROPIC_MAX_TOKENS
-    messages: list[dict[str, Any]] = [{"role": "user", "content": user}]
+    model = settings.GEMINI_MODEL
+    budget = max_tokens or settings.GEMINI_MAX_TOKENS
+
+    gemini_tools = [
+        types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration(
+                    name=tool["name"],
+                    description=tool.get("description") or "",
+                    parameters_json_schema=tool.get("input_schema")
+                    or {"type": "object", "properties": {}, "required": []},
+                )
+                for tool in tools
+            ]
+        )
+    ]
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        max_output_tokens=budget,
+        tools=gemini_tools,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        thinking_config=_thinking_config(effort),
+    )
+
+    contents: list[types.Content] = [
+        types.Content(role="user", parts=[types.Part.from_text(text=user)])
+    ]
 
     for _ in range(max_iterations):
-        # messages/tools are built as plain dicts (not the SDK's TypedDicts) so this
-        # module has no SDK-shape imports beyond the client itself; mypy's overload
-        # resolution wants the literal TypedDict shapes, but the SDK accepts plain
-        # dicts identically at runtime.
-        response = await client.messages.create(  # type: ignore[call-overload]
-            model=model,
-            max_tokens=budget,
-            system=system,
-            messages=messages,
-            tools=tools,
-            output_config={"effort": effort},
+        response = await client.aio.models.generate_content(
+            model=model, contents=contents, config=config
         )
 
-        if getattr(response, "stop_reason", None) == "refusal":
-            raise LLMResponseError("Model refused the request.")
+        finish_reason = _finish_reason(response)
+        if finish_reason in (
+            types.FinishReason.SAFETY,
+            types.FinishReason.PROHIBITED_CONTENT,
+            types.FinishReason.BLOCKLIST,
+            types.FinishReason.RECITATION,
+        ):
+            raise LLMResponseError(f"Model refused the request (finish_reason={finish_reason!r}).")
 
-        if getattr(response, "stop_reason", None) != "tool_use":
-            text = _first_text_block(getattr(response, "content", None))
-            if text is None:
+        function_calls = response.function_calls or []
+        if not function_calls:
+            text = (response.text or "").strip()
+            if not text:
                 raise LLMResponseError("Model returned no usable text.")
-            return text.strip()
+            return text
 
-        # Append the assistant turn verbatim -- the tool_use blocks must
-        # survive intact or the follow-up tool_result cannot be matched.
-        messages.append({"role": "assistant", "content": response.content})
+        # Replay the model's own turn (its function-call parts) verbatim --
+        # `candidates[0].content` already carries them, so there is nothing to
+        # reconstruct, unlike Anthropic's tool_use blocks.
+        candidates = response.candidates or []
+        contents.append(candidates[0].content)
 
-        results: list[dict[str, Any]] = []
-        for block in response.content:
-            if getattr(block, "type", None) != "tool_use":
-                continue
+        response_parts: list[types.Part] = []
+        for call in function_calls:
             try:
-                payload = await tool_executor(block.name, dict(block.input or {}))
-                is_error = not bool(payload.get("success", True))
+                payload = await tool_executor(call.name, dict(call.args or {}))
             except Exception as exc:  # noqa: BLE001 -- surfaced to the model
-                logger.warning(f"AI tool {block.name!r} raised: {exc!s}")
+                logger.warning(f"AI tool {call.name!r} raised: {exc!s}")
                 payload = {"success": False, "message": "Tool execution failed."}
-                is_error = True
-            results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": json.dumps(payload, default=str),
-                    "is_error": is_error,
-                }
+            response_parts.append(
+                types.Part.from_function_response(name=call.name, response=payload)
             )
-        # All results go back in ONE user message; splitting them trains the
+        # All results go back in ONE user turn; splitting them trains the
         # model out of parallel tool calls.
-        messages.append({"role": "user", "content": results})
+        contents.append(types.Content(role="user", parts=response_parts))
 
     raise LLMResponseError(
         f"Tool-use loop did not converge within {max_iterations} iterations."

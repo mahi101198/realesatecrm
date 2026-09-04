@@ -146,34 +146,56 @@ class VoiceService:
     ) -> None:
         """Start the SDK agent in the room, then pump audio until hangup.
 
-        UNVERIFIED IN THIS ENVIRONMENT: `AgentSession.start` needs a real room
-        connection and a real STT/TTS provider, neither of which exists here.
-        The ordering (agent first, then pump) is deliberate -- the agent must be
-        subscribed before the customer's first syllable arrives, or the greeting
-        talks over them.
+        VERIFIED LIVE against the real LiveKit Inference gateway (Aug 2026): the
+        LLM call, and separately a TTS synth call, both succeed against the
+        credentials/models this deployment is configured with.
+
+        WHY THIS IS WRAPPED IN `http_context.open()`
+            `livekit.agents.inference.STT`/`TTS` lazily fetch their aiohttp
+            session from `livekit.agents.utils.http_context`, which is normally
+            opened once per job by the standard `agents.cli.run_app` worker
+            process. This codebase never runs that worker -- the agent is
+            started manually, right here, inside a FastAPI websocket handler --
+            so without this wrapper every STT/TTS call raises
+            `APIConnectionError: Attempted to use an http session outside of a
+            job context` the instant the agent tries to listen or speak
+            (reproduced against the live gateway; fixed by this exact wrapper,
+            which is the SDK's own documented pattern for running plugins
+            outside the worker). The LLM client is unaffected -- it does not use
+            `http_context` -- which is why a bare LLM call alone would not have
+            caught this.
         """
         from livekit import rtc
+        from livekit.agents.utils import http_context
 
-        agent = pipeline.build_agent(context, conversation)
-        agent_session = pipeline.build_session()
+        async with http_context.open():
+            agent = pipeline.build_agent(context, conversation)
+            agent_session = pipeline.build_session()
 
-        agent_room = rtc.Room()
-        await agent_room.connect(
-            settings.LIVEKIT_URL,
-            livekit_gateway.build_access_token(
-                room_name=room_name,
-                identity=livekit_gateway.AGENT_PARTICIPANT_IDENTITY,
-            ),
-        )
-        try:
-            await agent_session.start(agent=agent, room=agent_room)
-            await conversation.open()
-            await bridge.pump_inbound()
-        finally:
+            agent_room = rtc.Room()
+            await agent_room.connect(
+                settings.LIVEKIT_URL,
+                livekit_gateway.build_access_token(
+                    room_name=room_name,
+                    identity=livekit_gateway.AGENT_PARTICIPANT_IDENTITY,
+                ),
+            )
             try:
-                await agent_session.aclose()
+                await agent_session.start(agent=agent, room=agent_room)
+                _wire_diagnostics(agent_session, room_name)
+                # conversation.open() only computes the line and records it to
+                # the transcript/call_messages -- it never touches TTS. Without
+                # this `.say()` the customer hears silence: the greeting was
+                # decided, never spoken. `.say()` is a plain (non-async) call:
+                # it hands the line to TTS and returns a SpeechHandle
+                # immediately, it does not block until playout finishes.
+                agent_session.say(await conversation.open())
+                await bridge.pump_inbound()
             finally:
-                await agent_room.disconnect()
+                try:
+                    await agent_session.aclose()
+                finally:
+                    await agent_room.disconnect()
 
     async def _finish(
         self,
@@ -195,6 +217,11 @@ class VoiceService:
         """
         await bridge.aclose()
         await livekit_gateway.delete_room(room_name)
+        # Transcript writes are fire-and-forget during the call (see
+        # `VoiceAgent._record`) so they never delay a spoken turn; this is the
+        # one point that waits for them, before summarise/record_outcome run on
+        # a different session and before the process can move on.
+        await conversation.flush_pending_writes()
 
         result = await conversation.summarise()
         if degraded_reason:
@@ -217,3 +244,35 @@ class VoiceService:
             return VoiceSessionResult(started=True, reason="OUTCOME_NOT_RECORDED")
 
         return VoiceSessionResult(started=True, reason=degraded_reason, **recorded)
+
+
+def _wire_diagnostics(agent_session: Any, room_name: str) -> None:
+    """Log the SDK's own turn-taking/STT events for one call.
+
+    UNVERIFIED IN THIS ENVIRONMENT (see pipeline.py's module docstring) meant
+    the room-join path had never actually been exercised end-to-end. The first
+    live call through it produced audio and a spoken greeting but never a
+    second turn -- with nothing in this codebase's own logs to say whether the
+    SDK ever heard the customer at all. These three events are the SDK's own
+    visibility into STT/VAD/turn-detection state, and cost nothing to log:
+    `user_input_transcribed` fires on every interim AND final transcript (so
+    "nothing logged" means STT never produced so much as a partial guess, not
+    just "no turn finished"), and the state-changed events show whether the
+    session ever left `listening`.
+    """
+
+    def _on_transcript(ev: Any) -> None:
+        logger.info(
+            f"[{room_name}] user_input_transcribed: final={ev.is_final} "
+            f"text={ev.transcript!r}"
+        )
+
+    def _on_user_state(ev: Any) -> None:
+        logger.info(f"[{room_name}] user_state_changed: {ev.old_state} -> {ev.new_state}")
+
+    def _on_agent_state(ev: Any) -> None:
+        logger.info(f"[{room_name}] agent_state_changed: {ev.old_state} -> {ev.new_state}")
+
+    agent_session.on("user_input_transcribed", _on_transcript)
+    agent_session.on("user_state_changed", _on_user_state)
+    agent_session.on("agent_state_changed", _on_agent_state)

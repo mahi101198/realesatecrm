@@ -229,15 +229,40 @@ class PropertySaleRepository:
     # -- Plain reads / non-transactional writes --
 
     async def get_by_id(self, tenant_id: UUID | None, sale_id: UUID) -> dict[str, Any] | None:
-        """Fetch a property sale by ID."""
+        """Fetch a property sale by ID with human-readable joined details."""
+        where_clause = "WHERE ps.id = :id"
+        params: dict[str, Any] = {"id": sale_id}
         if tenant_id is not None:
-            query = text(
-                "SELECT * FROM public.property_sales WHERE id = :id AND tenant_id = :tenant_id"
-            )
-            params = {"id": sale_id, "tenant_id": tenant_id}
-        else:
-            query = text("SELECT * FROM public.property_sales WHERE id = :id")
-            params = {"id": sale_id}
+            where_clause += " AND ps.tenant_id = :tenant_id"
+            params["tenant_id"] = tenant_id
+
+        query = text(
+            f"""
+            SELECT
+                ps.*,
+                c.full_name       AS customer_name,
+                c.phone           AS customer_phone,
+                c.email           AS customer_email,
+                c.city            AS customer_city,
+                p.property_code   AS property_code,
+                p.unit_number     AS unit_number,
+                p.bedrooms        AS property_bedrooms,
+                p.built_up_area   AS property_built_up_area,
+                pr.name           AS project_name,
+                pr.locality       AS project_locality,
+                pr.city           AS project_city,
+                bal.amount_received      AS amount_received,
+                bal.outstanding_balance  AS outstanding_balance,
+                u.name            AS created_by_name
+            FROM public.property_sales ps
+            LEFT JOIN public.customers c    ON c.id = ps.customer_id
+            LEFT JOIN public.properties p   ON p.id = ps.property_id
+            LEFT JOIN public.projects pr    ON pr.id = p.project_id
+            LEFT JOIN public.v_property_sale_balances bal ON bal.sale_id = ps.id
+            LEFT JOIN public.users u        ON u.id = ps.created_by
+            {where_clause}
+            """
+        )
 
         result = await self.session.execute(query, params)
         row = result.mappings().one_or_none()
@@ -279,34 +304,55 @@ class PropertySaleRepository:
         }
 
         if tenant_id is not None:
-            where_conditions.append("tenant_id = :tenant_id")
+            where_conditions.append("ps.tenant_id = :tenant_id")
             params["tenant_id"] = tenant_id
 
         if filters.property_id:
-            where_conditions.append("property_id = :filter_property_id")
+            where_conditions.append("ps.property_id = :filter_property_id")
             params["filter_property_id"] = filters.property_id
 
         if filters.customer_id:
-            where_conditions.append("customer_id = :filter_customer_id")
+            where_conditions.append("ps.customer_id = :filter_customer_id")
             params["filter_customer_id"] = filters.customer_id
 
         if filters.sale_status:
-            where_conditions.append("sale_status = CAST(:filter_status AS public.sale_status)")
+            where_conditions.append("ps.sale_status = CAST(:filter_status AS public.sale_status)")
             params["filter_status"] = filters.sale_status
 
         where_str = " AND ".join(where_conditions)
 
-        count_query = text(
-            f"SELECT COUNT(*) FROM public.property_sales WHERE {where_str}"  # noqa: S608
+        count_query = text(  # noqa: S608
+            f"SELECT COUNT(*) FROM public.property_sales ps WHERE {where_str}"
         )
         count_result = await self.session.execute(count_query, params)
         total_count = count_result.scalar_one()
 
         select_query = text(
             f"""
-            SELECT * FROM public.property_sales
+            SELECT
+                ps.*,
+                c.full_name       AS customer_name,
+                c.phone           AS customer_phone,
+                c.email           AS customer_email,
+                c.city            AS customer_city,
+                p.property_code   AS property_code,
+                p.unit_number     AS unit_number,
+                p.bedrooms        AS property_bedrooms,
+                p.built_up_area   AS property_built_up_area,
+                pr.name           AS project_name,
+                pr.locality       AS project_locality,
+                pr.city           AS project_city,
+                bal.amount_received      AS amount_received,
+                bal.outstanding_balance  AS outstanding_balance,
+                u.name            AS created_by_name
+            FROM public.property_sales ps
+            LEFT JOIN public.customers c    ON c.id = ps.customer_id
+            LEFT JOIN public.properties p   ON p.id = ps.property_id
+            LEFT JOIN public.projects pr    ON pr.id = p.project_id
+            LEFT JOIN public.v_property_sale_balances bal ON bal.sale_id = ps.id
+            LEFT JOIN public.users u        ON u.id = ps.created_by
             WHERE {where_str}
-            ORDER BY created_at DESC
+            ORDER BY ps.sale_date DESC, ps.created_at DESC
             LIMIT :limit OFFSET :offset
             """  # noqa: S608
         )
@@ -409,7 +455,7 @@ class PropertySalePaymentRepository:
         for key, value in data.items():
             param_key = f"val_{key}"
             if key == "payment_status":
-                set_clauses.append(f"{key} = :{param_key}::public.payment_status")
+                set_clauses.append(f"{key} = CAST(:{param_key} AS public.payment_status)")
             else:
                 set_clauses.append(f"{key} = :{param_key}")
             params[param_key] = value

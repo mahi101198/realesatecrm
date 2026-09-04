@@ -88,9 +88,9 @@ def is_voice_agent_enabled() -> bool:
     hold a conversation, so we do not open a room at all -- the Superfone call
     proceeds exactly as it does today, minus the AI participant.
 
-    Deliberately does NOT require ANTHROPIC_API_KEY any more: the voice agent
+    Deliberately does NOT require GEMINI_API_KEY any more: the voice agent
     reasons through `app/voice/llm.py`, so a deployment that runs voice without
-    WhatsApp needs no Anthropic key at all, and gating on one would refuse a
+    WhatsApp needs no Gemini key at all, and gating on one would refuse a
     perfectly workable configuration.
     """
     return bool(

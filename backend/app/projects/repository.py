@@ -1,5 +1,6 @@
 """Project Repository for database operations."""
 
+import json
 import logging
 from typing import Any
 from uuid import UUID
@@ -45,7 +46,7 @@ class ProjectRepository:
                 :price_min, :price_max, :currency,
                 :total_units, :available_units, :project_area,
                 CAST(:project_area_unit AS public.area_unit),
-                :metadata, :created_by
+                CAST(:metadata AS jsonb), :created_by
             )
             RETURNING *
             """
@@ -84,7 +85,7 @@ class ProjectRepository:
             "available_units": data.available_units,
             "project_area": data.project_area,
             "project_area_unit": data.project_area_unit,
-            "metadata": data.metadata or {},
+            "metadata": json.dumps(data.metadata or {}, default=str),
             "created_by": created_by,
         }
         result = await self.session.execute(query, params)
@@ -112,7 +113,10 @@ class ProjectRepository:
         for key, value in data_dict.items():
             param_key = f"val_{key}"
             if key in enum_casts:
-                set_clauses.append(f"{key} = :{param_key}::{enum_casts[key]}")
+                set_clauses.append(f"{key} = CAST(:{param_key} AS {enum_casts[key]})")
+            elif key == "metadata":
+                set_clauses.append(f"{key} = CAST(:{param_key} AS jsonb)")
+                value = json.dumps(value or {}, default=str)
             else:
                 set_clauses.append(f"{key} = :{param_key}")
             params[param_key] = value

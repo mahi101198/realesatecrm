@@ -34,6 +34,7 @@ from app.core.middleware import (
     TimingMiddleware,
 )
 from app.core.request_context import get_request_id
+from app.core.security import init_supabase_jwks
 from app.customers.router import router as customers_router
 from app.db import session as db_session
 from app.db.redis import close_redis, get_redis_client, init_redis
@@ -45,6 +46,7 @@ from app.ownerships.router import router as ownerships_router
 from app.projects.router import router as projects_router
 from app.properties.router import router as properties_router
 from app.public_intake.router import router as public_intake_router
+from app.roles.router import router as roles_router
 from app.sales.router import router as sales_router
 from app.tenants.router import router as tenants_router
 from app.users.router import router as users_router
@@ -72,14 +74,17 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # 3. Initialize Ephemeral Redis Client
     await init_redis()
 
-    # 4. Register the AI voice agent's speech providers (LiveKit Inference).
+    # 4. Fetch & cache Supabase JWKS public keys (needed for ES256 JWT verification).
+    await init_supabase_jwks()
+
+    # 5. Register the AI voice agent's speech providers (LiveKit Inference).
     #    Config-driven and fail-open: with the VOICE_* model settings empty this
     #    registers nothing, `VoiceService.preflight()` then reports the voice
     #    layer as unconfigured, and Superfone media streams are accepted and
     #    closed cleanly -- exactly as they are today.
     register_inference_providers()
 
-    # 5. Start Background Call-Job Scheduler (Redis-locked, single dispatcher)
+    # 6. Start Background Call-Job Scheduler (Redis-locked, single dispatcher)
     call_scheduler_task = asyncio.create_task(run_call_scheduler_loop())
 
     yield
@@ -145,6 +150,7 @@ app.include_router(leads_router, prefix=API_V1_PREFIX)
 app.include_router(locations_router, prefix=API_V1_PREFIX)
 app.include_router(projects_router, prefix=API_V1_PREFIX)
 app.include_router(properties_router, prefix=API_V1_PREFIX)
+app.include_router(roles_router, prefix=API_V1_PREFIX)
 app.include_router(appointments_router, prefix=API_V1_PREFIX)
 app.include_router(followups_router, prefix=API_V1_PREFIX)
 app.include_router(bookings_router, prefix=API_V1_PREFIX)

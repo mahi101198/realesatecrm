@@ -65,6 +65,19 @@ class FollowUpResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # ── Joined human-readable display fields ────────────────────────────────
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    customer_city: str | None = None
+    lead_number: str | None = None
+    lead_sales_stage: str | None = None
+    lead_status: str | None = None
+    lead_purpose: str | None = None
+    lead_preferred_city: str | None = None
+    lead_budget_min: str | None = None
+    lead_budget_max: str | None = None
+    assigned_agent_name: str | None = None
+
 
 class FollowUpFilter(BaseModel):
     """Filter parameters for listing follow-ups."""

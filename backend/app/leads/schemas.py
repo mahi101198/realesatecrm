@@ -116,6 +116,12 @@ class LeadResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # ── Joined human-readable display fields (populated by search(), only) ──
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    customer_email: str | None = None
+    customer_city: str | None = None
+
 
 class LeadFilter(BaseModel):
     """Filter parameters for listing leads."""
@@ -183,3 +189,21 @@ class LeadNoteResponse(BaseModel):
     is_pinned: bool
     created_at: datetime
     updated_at: datetime
+
+
+class SalesAgentResponse(BaseModel):
+    """A sales agent assignable to a lead. `id` here is the sales_agents.id
+    that LeadAssign.sales_agent_id / assigned_sales_agent_id expects --
+    deliberately NOT the underlying staff user's id, since those are two
+    different tables (a staff user only becomes assignable once they have a
+    sales_agents row)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    name: str
+    email: str
+    employee_code: str | None = None
+    availability: str
+    is_active: bool

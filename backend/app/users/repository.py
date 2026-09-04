@@ -176,6 +176,22 @@ class UserAdminRepository:
         row = result.mappings().one_or_none()
         return dict(row) if row else None
 
+    async def list_assignable_roles(self, tenant_id: UUID) -> list[dict[str, Any]]:
+        """List every role assignable within this tenant: system roles
+        (tenant_id IS NULL) plus this tenant's own custom roles, active only."""
+        result = await self.session.execute(
+            text(
+                """
+                SELECT id, name, display_name, description, is_system_role
+                FROM public.roles
+                WHERE is_active = true AND (tenant_id IS NULL OR tenant_id = :tenant_id)
+                ORDER BY is_system_role DESC, display_name ASC
+                """
+            ),
+            {"tenant_id": tenant_id},
+        )
+        return [dict(r) for r in result.mappings().all()]
+
     async def get_role_by_id(self, role_id: UUID) -> dict[str, Any] | None:
         """Fetch a role's name/tenant_id/system-role flag, for escalation checks."""
         result = await self.session.execute(

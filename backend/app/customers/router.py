@@ -17,6 +17,8 @@ from app.customers.schemas import (
 )
 from app.customers.service import CustomerService
 from app.db.session import get_db_session
+from app.ownerships.schemas import CustomerOwnershipHistoryResponse
+from app.ownerships.service import PropertyOwnershipService
 from app.shared.schemas import PaginatedResponse, PaginationParams
 
 router = APIRouter(prefix="/customers", tags=["Customers"])
@@ -106,3 +108,33 @@ async def update_customer(
     customer = await service.get_customer(tenant_id, customer_id)
     ensure_tenant_resource_access(context, customer.tenant_id)
     return await service.update_customer(tenant_id, customer_id, data)
+
+
+@router.get(
+    "/{customer_id}/ownership-history",
+    response_model=list[CustomerOwnershipHistoryResponse],
+    status_code=status.HTTP_200_OK,
+    summary="Customer Ownership History",
+    description=(
+        "Return the complete property ownership history for a customer — both current "
+        "and past holdings — enriched with property code, unit number, project name, "
+        "and sale financials. Uses a single DB query (no N+1 round-trips)."
+    ),
+)
+async def get_customer_ownership_history(
+    customer_id: UUID,
+    context: RequestContext = Depends(require_permission(Permission.PROPERTY_OWNERSHIP_READ)),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[CustomerOwnershipHistoryResponse]:
+    """Customer ownership history endpoint."""
+    tenant_id = resolve_tenant_scope(context)
+    if tenant_id is None:
+        raise ValueError("Tenant scope is required.")
+
+    # Verify the customer exists and is in the caller's tenant
+    customer_service = CustomerService(session)
+    customer = await customer_service.get_customer(tenant_id, customer_id)
+    ensure_tenant_resource_access(context, customer.tenant_id)
+
+    ownership_service = PropertyOwnershipService(session)
+    return await ownership_service.get_history_for_customer(tenant_id, customer_id)

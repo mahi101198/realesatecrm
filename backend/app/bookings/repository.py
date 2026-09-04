@@ -120,36 +120,59 @@ class PropertyBookingRepository:
         }
 
         if tenant_id is not None:
-            where_conditions.append("tenant_id = :tenant_id")
+            where_conditions.append("pb.tenant_id = :tenant_id")
             params["tenant_id"] = tenant_id
 
         if filters.property_id:
-            where_conditions.append("property_id = :filter_property_id")
+            where_conditions.append("pb.property_id = :filter_property_id")
             params["filter_property_id"] = filters.property_id
 
         if filters.customer_id:
-            where_conditions.append("customer_id = :filter_customer_id")
+            where_conditions.append("pb.customer_id = :filter_customer_id")
             params["filter_customer_id"] = filters.customer_id
+
+        if filters.lead_id:
+            where_conditions.append("pb.lead_id = :filter_lead_id")
+            params["filter_lead_id"] = filters.lead_id
 
         if filters.booking_status:
             where_conditions.append(
-                "booking_status = CAST(:filter_status AS public.booking_status)"
+                "pb.booking_status = CAST(:filter_status AS public.booking_status)"
             )
             params["filter_status"] = filters.booking_status
 
         where_str = " AND ".join(where_conditions)
 
-        count_query = text(
-            f"SELECT COUNT(*) FROM public.property_bookings WHERE {where_str}"  # noqa: S608
+        count_query = text(  # noqa: S608
+            f"SELECT COUNT(*) FROM public.property_bookings pb WHERE {where_str}"
         )
         count_result = await self.session.execute(count_query, params)
         total_count = count_result.scalar_one()
 
         select_query = text(
             f"""
-            SELECT * FROM public.property_bookings
+            SELECT
+                pb.*,
+                c.full_name   AS customer_name,
+                c.phone       AS customer_phone,
+                c.email       AS customer_email,
+                c.city        AS customer_city,
+                p.property_code AS property_code,
+                p.unit_number   AS unit_number,
+                p.bedrooms      AS property_bedrooms,
+                p.base_price    AS property_base_price,
+                pr.name         AS project_name,
+                l.lead_number   AS lead_number,
+                l.sales_stage::text AS lead_sales_stage,
+                u.name          AS created_by_name
+            FROM public.property_bookings pb
+            LEFT JOIN public.customers c  ON c.id = pb.customer_id
+            LEFT JOIN public.properties p ON p.id = pb.property_id
+            LEFT JOIN public.projects pr  ON pr.id = p.project_id
+            LEFT JOIN public.leads l      ON l.id = pb.lead_id
+            LEFT JOIN public.users u      ON u.id = pb.created_by
             WHERE {where_str}
-            ORDER BY created_at DESC
+            ORDER BY pb.created_at DESC
             LIMIT :limit OFFSET :offset
             """  # noqa: S608
         )

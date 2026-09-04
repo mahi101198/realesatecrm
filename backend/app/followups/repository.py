@@ -1,5 +1,4 @@
-"""Follow-up Repository for database operations."""
-
+import json
 import logging
 from typing import Any
 from uuid import UUID
@@ -33,7 +32,8 @@ class FollowUpRepository:
                 :tenant_id, :lead_id, :customer_id, :related_call_id,
                 CAST(:follow_up_type AS public.follow_up_type), :scheduled_at,
                 'pending'::public.follow_up_status,
-                :reason, :notes, :assigned_sales_agent_id, :created_by, :metadata
+                :reason, :notes, :assigned_sales_agent_id, :created_by,
+                CAST(:metadata AS jsonb)
             )
             RETURNING *
             """
@@ -49,7 +49,7 @@ class FollowUpRepository:
             "notes": data.notes,
             "assigned_sales_agent_id": data.assigned_sales_agent_id,
             "created_by": created_by,
-            "metadata": data.metadata or {},
+            "metadata": json.dumps(data.metadata or {}, default=str),
         }
         result = await self.session.execute(query, params)
         row = result.mappings().one()
@@ -99,7 +99,10 @@ class FollowUpRepository:
         for key, value in data_dict.items():
             param_key = f"val_{key}"
             if key in enum_casts:
-                set_clauses.append(f"{key} = :{param_key}::{enum_casts[key]}")
+                set_clauses.append(f"{key} = CAST(:{param_key} AS {enum_casts[key]})")
+            elif key == "metadata":
+                set_clauses.append(f"{key} = CAST(:{param_key} AS jsonb)")
+                value = json.dumps(value or {}, default=str)
             else:
                 set_clauses.append(f"{key} = :{param_key}")
             params[param_key] = value
@@ -169,48 +172,66 @@ class FollowUpRepository:
         }
 
         if tenant_id is not None:
-            where_conditions.append("tenant_id = :tenant_id")
+            where_conditions.append("fu.tenant_id = :tenant_id")
             params["tenant_id"] = tenant_id
 
         if filters.lead_id:
-            where_conditions.append("lead_id = :filter_lead_id")
+            where_conditions.append("fu.lead_id = :filter_lead_id")
             params["filter_lead_id"] = filters.lead_id
 
         if filters.customer_id:
-            where_conditions.append("customer_id = :filter_customer_id")
+            where_conditions.append("fu.customer_id = :filter_customer_id")
             params["filter_customer_id"] = filters.customer_id
 
         if filters.assigned_sales_agent_id:
-            where_conditions.append("assigned_sales_agent_id = :filter_agent_id")
+            where_conditions.append("fu.assigned_sales_agent_id = :filter_agent_id")
             params["filter_agent_id"] = filters.assigned_sales_agent_id
 
         if filters.status:
-            where_conditions.append("status = CAST(:filter_status AS public.follow_up_status)")
+            where_conditions.append("fu.status = CAST(:filter_status AS public.follow_up_status)")
             params["filter_status"] = filters.status
 
         if filters.follow_up_type:
-            where_conditions.append("follow_up_type = CAST(:filter_type AS public.follow_up_type)")
+            where_conditions.append("fu.follow_up_type = CAST(:filter_type AS public.follow_up_type)")
             params["filter_type"] = filters.follow_up_type
 
         if filters.scheduled_before:
-            where_conditions.append("scheduled_at <= :sched_before")
+            where_conditions.append("fu.scheduled_at <= :sched_before")
             params["sched_before"] = filters.scheduled_before
 
         if filters.scheduled_after:
-            where_conditions.append("scheduled_at >= :sched_after")
+            where_conditions.append("fu.scheduled_at >= :sched_after")
             params["sched_after"] = filters.scheduled_after
 
         where_str = " AND ".join(where_conditions)
 
-        count_query = text(f"SELECT COUNT(*) FROM public.follow_ups WHERE {where_str}")  # noqa: S608
+        count_query = text(  # noqa: S608
+            f"SELECT COUNT(*) FROM public.follow_ups fu WHERE {where_str}"
+        )
         count_result = await self.session.execute(count_query, params)
         total_count = count_result.scalar_one()
 
         select_query = text(
             f"""
-            SELECT * FROM public.follow_ups
+            SELECT
+                fu.*,
+                c.full_name   AS customer_name,
+                c.phone       AS customer_phone,
+                c.city        AS customer_city,
+                l.lead_number AS lead_number,
+                l.sales_stage::text AS lead_sales_stage,
+                l.status::text      AS lead_status,
+                l.purpose::text     AS lead_purpose,
+                l.preferred_city    AS lead_preferred_city,
+                l.budget_min::text  AS lead_budget_min,
+                l.budget_max::text  AS lead_budget_max,
+                u.name              AS assigned_agent_name
+            FROM public.follow_ups fu
+            LEFT JOIN public.customers c  ON c.id = fu.customer_id
+            LEFT JOIN public.leads     l  ON l.id = fu.lead_id
+            LEFT JOIN public.users     u  ON u.id = fu.assigned_sales_agent_id
             WHERE {where_str}
-            ORDER BY scheduled_at ASC
+            ORDER BY fu.scheduled_at ASC
             LIMIT :limit OFFSET :offset
             """  # noqa: S608
         )

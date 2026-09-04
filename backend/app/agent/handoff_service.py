@@ -40,14 +40,17 @@ staff member actually accepts.
 """
 
 import logging
+from math import ceil
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.repository import AgentRepository
+from app.agent.schemas import SalesHandoffFilter, SalesHandoffResponse
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.integrations.superfone.factory import get_superfone_crm_client
+from app.shared.schemas import PaginatedResponse, PaginationParams
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +91,26 @@ class SalesHandoffService:
             priority,
             notes,
             conversation_summary=conversation_summary,
+        )
+
+    async def list_handoffs(
+        self,
+        tenant_id: UUID | None,
+        filters: SalesHandoffFilter,
+        pagination: PaginationParams,
+    ) -> PaginatedResponse[SalesHandoffResponse]:
+        """List sales handoffs for dashboard/reporting reads."""
+        rows, total = await self.repository.search_sales_handoffs(
+            tenant_id, filters, pagination
+        )
+        items = [SalesHandoffResponse.model_validate(r) for r in rows]
+        pages = ceil(total / pagination.page_size) if pagination.page_size > 0 else 0
+        return PaginatedResponse[SalesHandoffResponse](
+            items=items,
+            page=pagination.page,
+            page_size=pagination.page_size,
+            total=total,
+            pages=pages,
         )
 
     async def accept_handoff(

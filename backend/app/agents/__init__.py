@@ -17,7 +17,7 @@ HARD RULES FOR EVERYTHING IN THIS PACKAGE
 1. No raw SQL against tenant tables. Every read and write goes through an
    existing tenant-scoped service, resolver or registered tool.
 2. Every LLM call goes through `app.agents.llm`. That module is the single
-   seam the test suite mocks, and the single place the `anthropic` SDK is
+   seam the test suite mocks, and the single place the `google-genai` SDK is
    imported.
 3. The AI layer fails CLOSED and fails QUIET: an LLM outage, a bad key or a
    malformed model response must never corrupt CRM state or break the caller

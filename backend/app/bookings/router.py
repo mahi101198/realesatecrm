@@ -72,6 +72,7 @@ async def get_booking(
 async def list_bookings(
     property_id: Annotated[UUID | None, Query(description="Filter by property ID")] = None,
     customer_id: Annotated[UUID | None, Query(description="Filter by customer ID")] = None,
+    lead_id: Annotated[UUID | None, Query(description="Filter by originating lead ID")] = None,
     booking_status: Annotated[
         str | None, Query(alias="status", description="Filter by booking status")
     ] = None,
@@ -83,7 +84,10 @@ async def list_bookings(
     """List property bookings endpoint."""
     tenant_id = resolve_tenant_scope(context)
     filters = PropertyBookingFilter(
-        property_id=property_id, customer_id=customer_id, booking_status=booking_status
+        property_id=property_id,
+        customer_id=customer_id,
+        lead_id=lead_id,
+        booking_status=booking_status,
     )
     pagination = PaginationParams(page=page, page_size=page_size)
     service = PropertyBookingService(session)

@@ -24,3 +24,6 @@ Thumbs.db
 # Personal/unrelated documents at repo root (not project deliverables)
 /1doc_human_voice.docx
 /1doc_humanized.docx
+
+# Frontend dashboard — lives in its own GitHub repo (realesatecrm_frontend)
+/dashboard/

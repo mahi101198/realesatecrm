@@ -125,6 +125,12 @@ class Permission(StrEnum):
     PLATFORM_WHATSAPP_CONFIG_MANAGE = "platform.whatsapp_config.manage"
     PLATFORM_SUPERFONE_CRM_CONFIG_MANAGE = "platform.superfone_crm_config.manage"
 
+    # Role & Permission Management (migration 035)
+    ROLE_READ = "role.read"
+    ROLE_CREATE = "role.create"
+    ROLE_UPDATE = "role.update"
+    ROLE_DELETE = "role.delete"
+
 
 def permission_code(permission: Permission | str) -> str:
     """Normalize Permission enum or raw string to a permission code."""

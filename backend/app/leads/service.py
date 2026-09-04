@@ -20,6 +20,7 @@ from app.leads.schemas import (
     LeadPropertyInterestResponse,
     LeadResponse,
     LeadUpdate,
+    SalesAgentResponse,
 )
 from app.shared.schemas import PaginatedResponse, PaginationParams
 from app.shared.utils import utcnow
@@ -246,6 +247,13 @@ class LeadService:
             )
         rows = await self.repository.list_notes(tenant_id, lead_id)
         return [LeadNoteResponse.model_validate(r) for r in rows]
+
+    async def list_sales_agents(self, tenant_id: UUID) -> list[SalesAgentResponse]:
+        """List active sales agents assignable to leads in this tenant --
+        the picker a lead-assignment UI needs, since assigned_sales_agent_id
+        is a sales_agents.id, not a staff user's id."""
+        rows = await self.repository.list_sales_agents(tenant_id)
+        return [SalesAgentResponse.model_validate(r) for r in rows]
 
     async def _validate_sales_agent(self, tenant_id: UUID, sales_agent_id: UUID) -> None:
         """Validate that sales agent exists, is active, and belongs to tenant."""

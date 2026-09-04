@@ -10,7 +10,13 @@ from app.core.exceptions import ForbiddenError, NotFoundError, UnauthorizedError
 from app.core.request_context import RequestContext, SecurityScope
 from app.shared.schemas import PaginatedResponse, PaginationParams
 from app.users.repository import SecurityIdentity, UserAdminRepository, UserRepository
-from app.users.schemas import RoleAssignRequest, UserFilter, UserResponse, UserRoleResponse
+from app.users.schemas import (
+    RoleAssignRequest,
+    RoleResponse,
+    UserFilter,
+    UserResponse,
+    UserRoleResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +181,14 @@ class UserAdminService:
         await self.get_user(tenant_id, user_id)
         rows = await self.repository.list_user_roles(tenant_id, user_id)
         return [UserRoleResponse.model_validate(r) for r in rows]
+
+    async def list_assignable_roles(self, tenant_id: UUID) -> list[RoleResponse]:
+        """List every role assignable within this tenant (system + tenant-owned
+        custom roles) -- the picker a role-assignment UI needs, since nothing
+        else in the API surfaces role names/IDs independent of a specific
+        user's existing grants."""
+        rows = await self.repository.list_assignable_roles(tenant_id)
+        return [RoleResponse.model_validate(r) for r in rows]
 
     async def assign_role(
         self, context: RequestContext, tenant_id: UUID, user_id: UUID, data: RoleAssignRequest

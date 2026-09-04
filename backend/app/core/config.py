@@ -151,7 +151,7 @@ class Settings(BaseSettings):
     # LiveKit does NOT replace Superfone: Superfone still dials the PSTN leg
     # and still streams that leg's audio to VOICE_AGENT_STREAM_URL. LiveKit is
     # the room this app bridges that audio INTO so an AI agent can participate.
-    # Optional by design, exactly like ANTHROPIC_API_KEY: with any of these
+    # Optional by design, exactly like GEMINI_API_KEY: with any of these
     # three empty, `app/voice/livekit_gateway.py::is_livekit_configured` is
     # False, the whole voice layer no-ops, and the call still gets placed and
     # tracked by the existing Superfone flow -- it just has no AI in the room.
@@ -260,40 +260,39 @@ class Settings(BaseSettings):
         ),
     )
 
-    # ---- Anthropic (AI orchestration + WhatsApp conversational layer) ----
+    # ---- Gemini (AI orchestration + WhatsApp conversational layer) ----
     # Optional by design: the whole AI layer fails CLOSED when the key is
     # empty. `app/agents/llm.py::is_llm_configured` gates every entry point,
     # so a deployment without a key keeps the deterministic CRM/webhook
     # pipeline working exactly as before instead of erroring per message.
-    ANTHROPIC_API_KEY: SecretStr = Field(
+    GEMINI_API_KEY: SecretStr = Field(
         default=SecretStr(""),
         description=(
-            "API key for the Anthropic Messages API, used by the lead workflow "
+            "API key for the Google Gemini API, used by the lead workflow "
             "orchestrator (intent classification) and the WhatsApp agent (reply "
             "composition). Empty disables the AI layer entirely."
         ),
     )
-    ANTHROPIC_MODEL: str = Field(
-        default="claude-opus-5",
+    GEMINI_MODEL: str = Field(
+        default="gemini-3.6-flash",
         description=(
-            "Anthropic model id used for every AI call in this app. Configurable "
-            "on purpose -- swap to a cheaper tier (e.g. claude-haiku-4-5) for "
-            "high-volume WhatsApp traffic without touching code."
+            "Gemini model id used for every AI call in this app. Configurable "
+            "on purpose -- swap tiers for high-volume WhatsApp traffic without "
+            "touching code."
         ),
     )
-    ANTHROPIC_MAX_TOKENS: int = Field(
+    GEMINI_MAX_TOKENS: int = Field(
         default=2048,
         description=(
-            "Default max_tokens for AI calls. Sized for short WhatsApp replies and "
-            "small structured-output payloads; note this caps thinking + response "
-            "text together."
+            "Default max_output_tokens for AI calls. Sized for short WhatsApp "
+            "replies and small structured-output payloads."
         ),
     )
     AI_ORCHESTRATOR_ENABLED: bool = Field(
         default=True,
         description=(
             "Master kill-switch for the inbound-WhatsApp AI orchestration layer. "
-            "When False (or when ANTHROPIC_API_KEY is empty) inbound messages are "
+            "When False (or when GEMINI_API_KEY is empty) inbound messages are "
             "still stored and instrumented, but no AI reply/action is produced."
         ),
     )

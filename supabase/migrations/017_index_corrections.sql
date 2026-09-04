@@ -54,8 +54,7 @@ create index if not exists idx_properties_search_available
 -- ---------------------------------------------------------------------------
 
 create index if not exists idx_ai_usage_call_service
-  on public.ai_usage_events (call_id, service_type)
-  on conflict do nothing;
+  on public.ai_usage_events (call_id, service_type);
 
 -- ---------------------------------------------------------------------------
 -- 7. communication_logs: tenant + date for timeline view

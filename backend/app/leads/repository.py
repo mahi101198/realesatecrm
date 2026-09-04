@@ -1,5 +1,4 @@
-"""Lead Repository for PostgreSQL database operations."""
-
+import json
 import logging
 from typing import Any
 from uuid import UUID
@@ -47,7 +46,7 @@ class LeadRepository:
                 CAST(:status AS public.lead_status), CAST(:sales_stage AS public.sales_stage),
                 :lead_score, CAST(:interest_level AS public.interest_level),
                 :assigned_sales_agent_id, :notes,
-                :metadata, :created_by
+                CAST(:metadata AS jsonb), :created_by
             )
             RETURNING *
             """
@@ -75,7 +74,7 @@ class LeadRepository:
             "interest_level": data.interest_level,
             "assigned_sales_agent_id": data.assigned_sales_agent_id,
             "notes": data.notes,
-            "metadata": data.metadata or {},
+            "metadata": json.dumps(data.metadata or {}, default=str),
             "created_by": created_by,
         }
         result = await self.session.execute(query, params)
@@ -130,7 +129,10 @@ class LeadRepository:
         for key, value in data_dict.items():
             param_key = f"val_{key}"
             if key in enum_casts:
-                set_clauses.append(f"{key} = :{param_key}::{enum_casts[key]}")
+                set_clauses.append(f"{key} = CAST(:{param_key} AS {enum_casts[key]})")
+            elif key == "metadata":
+                set_clauses.append(f"{key} = CAST(:{param_key} AS jsonb)")
+                value = json.dumps(value or {}, default=str)
             else:
                 set_clauses.append(f"{key} = :{param_key}")
             params[param_key] = value
@@ -159,67 +161,86 @@ class LeadRepository:
         pagination: PaginationParams,
     ) -> tuple[list[dict[str, Any]], int]:
         """Search and list leads with database-side filtering and pagination."""
-        where_conditions = ["deleted_at IS NULL"]
+        where_conditions = ["l.deleted_at IS NULL"]
         params: dict[str, Any] = {
             "limit": pagination.page_size,
             "offset": pagination.offset,
         }
 
         if tenant_id is not None:
-            where_conditions.append("tenant_id = :tenant_id")
+            where_conditions.append("l.tenant_id = :tenant_id")
             params["tenant_id"] = tenant_id
 
         if filters.customer_id:
-            where_conditions.append("customer_id = :filter_customer_id")
+            where_conditions.append("l.customer_id = :filter_customer_id")
             params["filter_customer_id"] = filters.customer_id
 
         if filters.status:
-            where_conditions.append("status = CAST(:filter_status AS public.lead_status)")
+            where_conditions.append("l.status = CAST(:filter_status AS public.lead_status)")
             params["filter_status"] = filters.status
 
         if filters.sales_stage:
-            where_conditions.append("sales_stage = CAST(:filter_sales_stage AS public.sales_stage)")
+            where_conditions.append(
+                "l.sales_stage = CAST(:filter_sales_stage AS public.sales_stage)"
+            )
             params["filter_sales_stage"] = filters.sales_stage
 
         if filters.assigned_sales_agent_id:
-            where_conditions.append("assigned_sales_agent_id = :filter_agent_id")
+            where_conditions.append("l.assigned_sales_agent_id = :filter_agent_id")
             params["filter_agent_id"] = filters.assigned_sales_agent_id
 
         if filters.campaign_id:
-            where_conditions.append("campaign_id = :filter_campaign_id")
+            where_conditions.append("l.campaign_id = :filter_campaign_id")
             params["filter_campaign_id"] = filters.campaign_id
 
         if filters.property_type_id:
-            where_conditions.append("property_type_id = :filter_property_type_id")
+            where_conditions.append("l.property_type_id = :filter_property_type_id")
             params["filter_property_type_id"] = filters.property_type_id
 
         if filters.min_budget is not None:
-            where_conditions.append("budget_max >= :min_budget")
+            where_conditions.append("l.budget_max >= :min_budget")
             params["min_budget"] = filters.min_budget
 
         if filters.max_budget is not None:
-            where_conditions.append("budget_min <= :max_budget")
+            where_conditions.append("l.budget_min <= :max_budget")
             params["max_budget"] = filters.max_budget
 
         if filters.query:
+            # Reps search by whatever they remember -- lead number, the buyer's
+            # name/phone, or the neighborhood -- not necessarily the lead number.
             where_conditions.append(
-                "(lead_number ILIKE :search_q OR "
-                "preferred_city ILIKE :search_q OR "
-                "preferred_locality ILIKE :search_q)"
+                "(l.lead_number ILIKE :search_q OR "
+                "l.preferred_city ILIKE :search_q OR "
+                "l.preferred_locality ILIKE :search_q OR "
+                "c.full_name ILIKE :search_q OR "
+                "c.phone ILIKE :search_q)"
             )
             params["search_q"] = f"%{filters.query.strip()}%"
 
         where_str = " AND ".join(where_conditions)
 
-        count_query = text(f"SELECT COUNT(*) FROM public.leads WHERE {where_str}")  # noqa: S608
+        count_query = text(  # noqa: S608
+            f"""
+            SELECT COUNT(*) FROM public.leads l
+            LEFT JOIN public.customers c ON c.id = l.customer_id
+            WHERE {where_str}
+            """
+        )
         count_result = await self.session.execute(count_query, params)
         total_count = count_result.scalar_one()
 
         select_query = text(
             f"""
-            SELECT * FROM public.leads
+            SELECT
+                l.*,
+                c.full_name AS customer_name,
+                c.phone     AS customer_phone,
+                c.email     AS customer_email,
+                c.city      AS customer_city
+            FROM public.leads l
+            LEFT JOIN public.customers c ON c.id = l.customer_id
             WHERE {where_str}
-            ORDER BY created_at DESC
+            ORDER BY l.created_at DESC
             LIMIT :limit OFFSET :offset
             """  # noqa: S608
         )
@@ -400,4 +421,23 @@ class LeadRepository:
             """
         )
         result = await self.session.execute(query, {"lead_id": lead_id, "tenant_id": tenant_id})
+        return [dict(r) for r in result.mappings().all()]
+
+    async def list_sales_agents(self, tenant_id: UUID) -> list[dict[str, Any]]:
+        """List active sales agents assignable to a lead in this tenant.
+
+        Joins sales_agents -> users since sales_agents.id (not users.id) is
+        what LeadAssign.sales_agent_id / assigned_sales_agent_id expects.
+        """
+        query = text(
+            """
+            SELECT sa.id, sa.user_id, u.name, u.email, sa.employee_code,
+                   sa.availability, sa.is_active
+            FROM public.sales_agents sa
+            JOIN public.users u ON u.id = sa.user_id
+            WHERE sa.tenant_id = :tenant_id AND sa.is_active = true AND sa.deleted_at IS NULL
+            ORDER BY u.name ASC
+            """
+        )
+        result = await self.session.execute(query, {"tenant_id": tenant_id})
         return [dict(r) for r in result.mappings().all()]

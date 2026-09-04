@@ -113,6 +113,13 @@ create table public.roles (
 
 create index idx_roles_tenant_id on public.roles (tenant_id);
 
+-- uq_roles_tenant_name above enforces nothing for system roles: standard SQL
+-- treats every NULL tenant_id as distinct from every other NULL, so
+-- UNIQUE (tenant_id, name) never rejects a second (NULL, 'admin') row. This
+-- partial index is what actually enforces "one row per system-role name".
+create unique index if not exists uq_roles_system_role_name
+  on public.roles (name) where tenant_id is null;
+
 create trigger trg_roles_updated_at
   before update on public.roles
   for each row execute function public.set_updated_at();
@@ -128,7 +135,8 @@ insert into public.roles (name, display_name, description, is_system_role) value
   ('manager',        'Manager',        'Team manager with reporting access.',     true),
   ('sales_manager',  'Sales Manager',  'Manages sales team and campaigns.',       true),
   ('sales_agent',    'Sales Agent',    'Front-line sales representative.',        true),
-  ('viewer',         'Viewer',         'Read-only access to CRM data.',           true);
+  ('viewer',         'Viewer',         'Read-only access to CRM data.',           true)
+on conflict (name) where tenant_id is null do nothing;
 
 -- ---------------------------------------------------------------------------
 -- PERMISSIONS

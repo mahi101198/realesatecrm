@@ -1,6 +1,7 @@
 """Property Ownership, Co-Owner & Resale Listing Business Service Layer."""
 
 import logging
+from math import ceil
 from uuid import UUID
 
 from sqlalchemy import text
@@ -11,8 +12,10 @@ from app.core.db_errors import raise_clean_error_for_write
 from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.ownerships.repository import PropertyOwnershipRepository, PropertyResaleListingRepository
 from app.ownerships.schemas import (
+    CustomerOwnershipHistoryResponse,
     PropertyOwnershipCoOwnerCreate,
     PropertyOwnershipCoOwnerResponse,
+    PropertyOwnershipFilter,
     PropertyOwnershipResponse,
     PropertyOwnershipUpdate,
     PropertyResaleListingCreate,
@@ -20,6 +23,7 @@ from app.ownerships.schemas import (
     PropertyResaleListingResponse,
     PropertyResaleListingUpdate,
 )
+from app.shared.schemas import PaginatedResponse, PaginationParams
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,24 @@ class PropertyOwnershipService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.repository = PropertyOwnershipRepository(session)
+
+    async def list_ownerships(
+        self,
+        tenant_id: UUID | None,
+        filters: PropertyOwnershipFilter,
+        pagination: PaginationParams,
+    ) -> PaginatedResponse[PropertyOwnershipResponse]:
+        """Search and list ownership records with pagination."""
+        rows, total = await self.repository.search(tenant_id, filters, pagination)
+        items = [PropertyOwnershipResponse.model_validate(r) for r in rows]
+        pages = ceil(total / pagination.page_size) if pagination.page_size > 0 else 0
+        return PaginatedResponse[PropertyOwnershipResponse](
+            items=items,
+            page=pagination.page,
+            page_size=pagination.page_size,
+            total=total,
+            pages=pages,
+        )
 
     async def get_current(
         self, tenant_id: UUID | None, property_id: UUID
@@ -54,6 +76,18 @@ class PropertyOwnershipService:
         """Fetch the full ownership chain for a property, oldest first."""
         rows = await self.repository.get_history_for_property(tenant_id, property_id)
         return [PropertyOwnershipResponse.model_validate(r) for r in rows]
+
+    async def get_history_for_customer(
+        self, tenant_id: UUID, customer_id: UUID
+    ) -> list[CustomerOwnershipHistoryResponse]:
+        """Return all ownership records (current + past) for a customer.
+
+        Each record is enriched with property_code, unit_number, project_name,
+        sale_date, sale_amount and sale_status from a single DB JOIN so the
+        caller receives a complete picture with no extra round-trips.
+        """
+        rows = await self.repository.get_by_customer(tenant_id, customer_id)
+        return [CustomerOwnershipHistoryResponse.model_validate(r) for r in rows]
 
     async def get_ownership(
         self, tenant_id: UUID | None, ownership_id: UUID

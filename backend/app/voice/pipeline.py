@@ -26,9 +26,18 @@ WHAT IS REAL HERE AND WHAT IS NOT
     for that path.
 
     STILL UNVERIFIED: the `AgentSession` lifecycle below has not been executed
-    against a live room with a real media stream -- there is no audio device
-    and no PSTN leg in the build environment. The models themselves HAVE been
-    exercised live against the gateway; the room-join path has not.
+    against a live room with a real PSTN media stream -- there is no phone call
+    in the build environment. The models HAVE been exercised live against the
+    gateway (LLM chat, TTS synth), including through the exact code path
+    `service.py::VoiceService._run` uses, which surfaced and fixed a real bug:
+    `inference.STT`/`TTS` need an aiohttp session from
+    `livekit.agents.utils.http_context`, normally opened by the
+    `agents.cli.run_app` worker process this codebase does not run. `_run` now
+    wraps itself in `http_context.open()` to supply one manually -- without it,
+    every real call would have failed on its first STT/TTS use with
+    `APIConnectionError: Attempted to use an http session outside of a job
+    context`. The room-join and PCMA<->PCM16 bridging path is still unverified
+    end-to-end.
 """
 
 import logging
@@ -208,14 +217,48 @@ def build_agent(context: VoiceCallContext, conversation: Any) -> "lk_agents.Agen
 
 
 def build_session() -> "lk_agents.AgentSession[None]":
-    """Build the `AgentSession` that drives the agent inside a room."""
+    """Build the `AgentSession` that drives the agent inside a room.
+
+    `llm=_NeverCalledLLM()` IS LOAD-BEARING, not decorative -- see that class's
+    docstring. Discovered live (Aug 2026): `AgentActivity._generate_reply`
+    (livekit-agents internal) raises `RuntimeError("trying to generate reply
+    without an LLM model")` whenever `self.llm is None`, checked BEFORE
+    `llm_node` is ever reached, for every reply the SDK generates itself after
+    STT/VAD finalizes a customer utterance -- not just the ones this app drives
+    via `.say()`/`.generate_reply()` with pre-computed text. With no `llm=`
+    anywhere (the state this code shipped in originally), the opening line
+    worked (`.say()` never goes through `_generate_reply`) but EVERY real
+    conversational turn raised inside the SDK's own background task -- silent
+    to this app's logs, which is why a live call would speak its opener and
+    then never respond again no matter what the customer said.
+    """
     if not is_pipeline_configured():
         raise VoicePipelineUnavailableError(
             pipeline_unavailable_reason() or "Voice pipeline is not configured."
         )
     from livekit import agents as lk_agents
+    from livekit.agents import llm as lk_llm
 
-    return lk_agents.AgentSession()
+    class _NeverCalledLLM(lk_llm.LLM):
+        """Satisfies `self.llm is not None` without ever actually running.
+
+        `CrmVoiceAgent.llm_node` intercepts every reply before the SDK would
+        reach an actual `.chat()` call -- see that method's docstring. This
+        object exists ONLY to be non-None; `chat()` raises if the SDK ever
+        calls it directly, which would mean `llm_node` silently stopped being
+        invoked. Failing loudly here beats a stub that would return
+        empty/garbage output. Defined locally (not at module scope) for the
+        same lazy-SDK-import reason as `CrmVoiceAgent` above.
+        """
+
+        def chat(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise VoicePipelineUnavailableError(
+                "The stub LLM was invoked directly -- llm_node should have "
+                "intercepted this call before it reached the SDK's default "
+                "LLM pipeline."
+            )
+
+    return lk_agents.AgentSession(llm=_NeverCalledLLM())
 
 
 def _require(factory: STTFactory | TTSFactory | None, kind: str) -> STTFactory | TTSFactory:

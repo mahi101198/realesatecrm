@@ -47,6 +47,14 @@ class PropertyResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # ── Joined human-readable display fields ────────────────────────────────
+    project_name: str | None = None
+    project_locality: str | None = None
+    project_city: str | None = None
+    property_type_name: str | None = None
+    current_owner_name: str | None = None
+    current_owner_phone: str | None = None
+
 
 class PropertyCreate(BaseModel):
     """Request payload to create a new property inventory unit."""
@@ -217,6 +225,8 @@ class PropertyDetailCoOwner(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     customer_id: UUID
+    customer_name: str | None = None
+    customer_phone: str | None = None
     role: str | None = None
     share_percentage: Decimal | None = None
 
@@ -228,6 +238,12 @@ class PropertyDetailOwnershipPeriod(BaseModel):
 
     id: UUID
     customer_id: UUID
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    customer_email: str | None = None
+    customer_city: str | None = None
+    sale_amount: Decimal | None = None
+    sale_date: date | None = None
     purchase_purpose: str | None = None
     previous_ownership_id: UUID | None = None
     ownership_start_date: date

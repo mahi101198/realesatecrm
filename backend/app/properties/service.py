@@ -287,6 +287,12 @@ class PropertyService:
             period = PropertyDetailOwnershipPeriod(
                 id=o["id"],
                 customer_id=o["customer_id"],
+                customer_name=o.get("customer_name"),
+                customer_phone=o.get("customer_phone"),
+                customer_email=o.get("customer_email"),
+                customer_city=o.get("customer_city"),
+                sale_amount=o.get("sale_amount"),
+                sale_date=o.get("sale_date"),
                 purchase_purpose=o["purchase_purpose"],
                 previous_ownership_id=o["previous_ownership_id"],
                 ownership_start_date=o["ownership_start_date"],

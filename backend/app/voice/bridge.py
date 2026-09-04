@@ -118,6 +118,12 @@ class SuperfoneLiveKitBridge:
         self._source: Any | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._closed = asyncio.Event()
+        # Diagnostics only, logged once at pump_inbound's exit -- there was
+        # previously no way to tell "the customer leg connected but never sent
+        # audio" from "audio was sent and something downstream dropped it"
+        # apart from reading STT/LLM call counts, which is a very indirect signal.
+        self._inbound_frames = 0
+        self._inbound_bytes = 0
 
     # ------------------------------------------------------------------
 
@@ -176,6 +182,8 @@ class SuperfoneLiveKitBridge:
             payload = extract_payload(message)
             if not payload:
                 continue
+            self._inbound_frames += 1
+            self._inbound_bytes += len(payload)
             pcm = pcma_to_pcm16(payload)
             if self._source is None:
                 continue
@@ -190,6 +198,11 @@ class SuperfoneLiveKitBridge:
             except Exception as exc:  # noqa: BLE001 -- one bad frame is not a dead call
                 logger.warning(f"Dropped an inbound audio frame: {exc!s}")
 
+        logger.info(
+            f"Media socket for room {self.room_name} received "
+            f"{self._inbound_frames} audio frame(s), {self._inbound_bytes} byte(s) total "
+            "from the customer leg."
+        )
         self._closed.set()
 
     async def _pump_outbound(self, track: Any) -> None:

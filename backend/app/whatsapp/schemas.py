@@ -82,6 +82,14 @@ class WhatsAppMessageResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    # Joined human-readable fields
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    customer_email: str | None = None
+    customer_city: str | None = None
+    lead_number: str | None = None
+    lead_status: str | None = None
+
 
 class WhatsAppMessageFilter(BaseModel):
     """Filter parameters for listing WhatsApp messages."""

@@ -149,7 +149,12 @@ class CallOrchestrator:
         first) and schedule time."""
         sql = text(
             """
-            SELECT cj.*, l.lead_score
+            SELECT
+                cj.*,
+                l.lead_score,
+                l.lead_number,
+                c.full_name  AS customer_name,
+                c.phone      AS customer_phone
             FROM public.call_jobs cj
             JOIN public.leads l ON cj.lead_id = l.id
             JOIN public.customers c ON cj.customer_id = c.id

@@ -239,3 +239,86 @@ class CallCompleteInput(BaseModel):
     termination_reason: str | None = None
     failure_code: str | None = None
     failure_message: str | None = None
+
+
+class CallFilter(BaseModel):
+    """Filter parameters for listing calls."""
+
+    lead_id: UUID | None = None
+    customer_id: UUID | None = None
+    status: str | None = None
+    outcome: str | None = None
+
+
+class CallResponse(BaseModel):
+    """Call record API response representation, for dashboard/reporting reads."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    tenant_id: UUID
+    lead_id: UUID | None = None
+    customer_id: UUID
+    direction: str
+    provider: str
+    phone_from: str | None = None
+    phone_to: str
+    status: str
+    outcome: str | None = None
+    initiated_at: datetime
+    answered_at: datetime | None = None
+    ended_at: datetime | None = None
+    duration_seconds: int | None = None
+    recording_url: str | None = None
+    call_summary: str | None = None
+    created_at: datetime
+
+    # Joined human-readable fields
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    customer_city: str | None = None
+    lead_number: str | None = None
+    lead_status: str | None = None
+    assigned_agent_name: str | None = None
+
+
+class SalesHandoffFilter(BaseModel):
+    """Filter parameters for listing sales handoffs."""
+
+    lead_id: UUID | None = None
+    status: str | None = None
+    assigned_user_id: UUID | None = None
+
+
+class SalesHandoffResponse(BaseModel):
+    """Sales handoff API response representation, for dashboard/reporting reads."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    tenant_id: UUID
+    lead_id: UUID
+    customer_id: UUID
+    reason: str | None = None
+    priority: int
+    status: str
+    assigned_user_id: UUID | None = None
+    requested_at: datetime
+    accepted_at: datetime | None = None
+    completed_at: datetime | None = None
+    notes: str | None = None
+    created_at: datetime
+
+    # Joined human-readable fields
+    customer_name: str | None = None
+    customer_phone: str | None = None
+    customer_email: str | None = None
+    customer_city: str | None = None
+    lead_number: str | None = None
+    lead_status: str | None = None
+    lead_budget_min: Decimal | float | None = None
+    lead_budget_max: Decimal | float | None = None
+    assigned_user_name: str | None = None
+    assigned_user_email: str | None = None
+    assigned_user_phone: str | None = None
+    conversation_summary: str | None = None

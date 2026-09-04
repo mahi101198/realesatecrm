@@ -1,6 +1,7 @@
 """SQLAlchemy 2.x Async Engine & Session Connection Pool Management."""
 
 import logging
+import ssl
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -27,8 +28,15 @@ def init_db_engine() -> AsyncEngine:
     db_url = settings.DATABASE_URL.get_secret_value()
     connect_args: dict[str, Any] = {}
     if "supabase.com" in db_url or "supabase.co" in db_url:
-        # asyncpg does not honor libpq sslmode query params; require TLS explicitly.
-        connect_args["ssl"] = True
+        # asyncpg does not honour libpq sslmode query params; pass an explicit
+        # SSLContext instead. We require TLS (encryption in transit) but skip
+        # CA verification — Supabase's session pooler presents a self-signed
+        # cert chain that is not trusted by the Windows cert store, mirroring
+        # libpq's `sslmode=require` semantics (encrypt, don't verify CA).
+        _ssl_ctx = ssl.create_default_context()
+        _ssl_ctx.check_hostname = False
+        _ssl_ctx.verify_mode = ssl.CERT_NONE
+        connect_args["ssl"] = _ssl_ctx
         connect_args["timeout"] = 30
 
     engine = create_async_engine(
@@ -76,6 +84,8 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_factory() as session:
         try:
             yield session
+            if session.in_transaction():
+                await session.commit()
         except Exception:
             await session.rollback()
             raise

@@ -32,8 +32,16 @@ ALLOWED_TOOL_NAMES = _WHATSAPP_ALLOWED_TOOL_NAMES
 MAX_SPOKEN_REPLY_CHARS = 320
 
 SYSTEM_PROMPT = """\
-You are a real-estate sales assistant speaking with a customer ON A PHONE CALL, \
-in the language they speak to you in.
+You are a real-estate sales assistant speaking with a customer ON A PHONE CALL.
+
+LANGUAGE
+Default to Hindi/Hinglish -- natural code-mixed Hindi-English, the way Indian \
+real-estate sales calls actually sound (not pure textbook Hindi, not pure \
+English). Use this for your OPENING LINE too, before the customer has said \
+anything -- do not default to English just because there is nothing to react \
+to yet. If the customer replies in pure English throughout, switch fully to \
+English to match them. The briefing's "Preferred language" line is the \
+strongest signal you have; follow it.
 
 THIS IS SPEECH, NOT TEXT
 Your reply is read aloud. One or two sentences, under about 40 words. No lists, \
@@ -71,6 +79,23 @@ warmly and briefly and stop. Do not push.
 """
 
 
+# Bare ISO codes ("hi", "en") are data, not instructions -- a model handed
+# "Preferred language: hi" in a list of facts has no obligation to read that as
+# "speak Hindi/Hinglish for this whole call." Spelling out what each code means
+# AS AN INSTRUCTION is what actually changes the model's behaviour; see
+# SYSTEM_PROMPT's LANGUAGE section, which this reinforces per-call. "hi" maps
+# to Hinglish rather than pure Hindi because that is what this product's
+# customers are actually spoken to in -- see SYSTEM_PROMPT.
+_LANGUAGE_INSTRUCTIONS: dict[str, str] = {
+    "hi": "Hindi/Hinglish (natural code-mixed Hindi-English)",
+    "en": "English",
+}
+
+
+def _language_instruction(code: str) -> str:
+    return _LANGUAGE_INSTRUCTIONS.get(code, f"Hindi/Hinglish (no specific mapping for '{code}')")
+
+
 def build_briefing(context: VoiceCallContext) -> str:
     """Render the spec-section-4 context bundle as the agent's briefing block.
 
@@ -81,7 +106,7 @@ def build_briefing(context: VoiceCallContext) -> str:
     lines = [
         "CALL BRIEFING (already established -- do NOT ask for any of this again)",
         f"  Customer name: {context.customer_name or '(not known)'}",
-        f"  Preferred language: {context.preferred_language}",
+        f"  Preferred language: speak in {_language_instruction(context.preferred_language)}.",
         f"  What they are looking for: {context.interest or '(not known)'}",
         f"  Budget: {context.budget or '(not known)'}",
         f"  Why we are calling: {context.reason_for_call or '(routine follow-up)'}",

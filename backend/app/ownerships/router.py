@@ -13,6 +13,7 @@ from app.db.session import get_db_session
 from app.ownerships.schemas import (
     PropertyOwnershipCoOwnerCreate,
     PropertyOwnershipCoOwnerResponse,
+    PropertyOwnershipFilter,
     PropertyOwnershipResponse,
     PropertyOwnershipUpdate,
     PropertyResaleListingCreate,
@@ -21,6 +22,7 @@ from app.ownerships.schemas import (
     PropertyResaleListingUpdate,
 )
 from app.ownerships.service import PropertyOwnershipService, PropertyResaleListingService
+from app.shared.schemas import PaginatedResponse, PaginationParams
 
 router = APIRouter(tags=["Property Ownership"])
 
@@ -28,6 +30,32 @@ router = APIRouter(tags=["Property Ownership"])
 # ---------------------------------------------------------------------------
 # PROPERTY OWNERSHIPS
 # ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/property-ownerships",
+    response_model=PaginatedResponse[PropertyOwnershipResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List Ownership Records",
+    description="Fetch paginated property ownership records with joined customer and property info.",
+)
+async def list_ownerships(
+    property_id: Annotated[UUID | None, Query(description="Filter by property ID")] = None,
+    customer_id: Annotated[UUID | None, Query(description="Filter by customer ID")] = None,
+    ownership_status: Annotated[str | None, Query(alias="status", description="Filter by status (active/historical/reversed)")] = None,
+    pagination: PaginationParams = Depends(),
+    context: RequestContext = Depends(require_permission(Permission.PROPERTY_OWNERSHIP_READ)),
+    session: AsyncSession = Depends(get_db_session),
+) -> PaginatedResponse[PropertyOwnershipResponse]:
+    """List ownership records endpoint."""
+    tenant_id = resolve_tenant_scope(context)
+    service = PropertyOwnershipService(session)
+    filters = PropertyOwnershipFilter(
+        property_id=property_id,
+        customer_id=customer_id,
+        ownership_status=ownership_status,
+    )
+    return await service.list_ownerships(tenant_id, filters, pagination)
 
 
 @router.get(

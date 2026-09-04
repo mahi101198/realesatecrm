@@ -179,6 +179,7 @@ async def test_briefing_carries_every_spec_section_4_field(
         "property_interests": [{"project_name": "Palm Grove"}],
     }
     repo = MagicMock()
+    repo.get_latest_call_context_snapshot = AsyncMock(return_value=None)
     repo.get_pre_call_context = AsyncMock(return_value=snapshot)
     monkeypatch.setattr("app.voice.context.AgentRepository", lambda _s: repo)
 
@@ -200,11 +201,43 @@ async def test_briefing_carries_every_spec_section_4_field(
     assert context.reason_for_call == "The customer asked to be called."
 
 
+async def test_briefing_prefers_the_stored_snapshot_over_a_live_rebuild(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`prepare_call` already paid for this aggregation before the phone rang.
+
+    Answer time -- when a customer is on the line -- must read that stored
+    result, not re-run the six-query aggregation live.
+    """
+    correlation = _correlation()
+    stored = {
+        "customer": {"full_name": "Asha Rao", "preferred_language": "en"},
+        "requirement": {"budget_min": "8000000", "budget_max": "10000000"},
+    }
+    repo = MagicMock()
+    repo.get_latest_call_context_snapshot = AsyncMock(return_value=stored)
+    repo.get_pre_call_context = AsyncMock(
+        side_effect=AssertionError("must not re-run the live aggregation")
+    )
+    monkeypatch.setattr("app.voice.context.AgentRepository", lambda _s: repo)
+
+    session = _session_returning(None, None)
+    context = await build_voice_call_context(session, correlation)
+
+    repo.get_latest_call_context_snapshot.assert_awaited_once_with(
+        correlation.tenant_id, correlation.call_job_id
+    )
+    repo.get_pre_call_context.assert_not_awaited()
+    assert context.customer_name == "Asha Rao"
+    assert context.budget == "8000000 to 10000000"
+
+
 async def test_briefing_survives_a_lead_with_no_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No snapshot is a thinner agent, not a dropped call."""
     repo = MagicMock()
+    repo.get_latest_call_context_snapshot = AsyncMock(return_value=None)
     repo.get_pre_call_context = AsyncMock(return_value=None)
     monkeypatch.setattr("app.voice.context.AgentRepository", lambda _s: repo)
 
@@ -245,6 +278,7 @@ async def test_budget_is_rendered_as_a_speakable_phrase(
     snapshot = MagicMock()
     snapshot.model_dump.return_value = {"customer": {}, "requirement": requirement}
     repo = MagicMock()
+    repo.get_latest_call_context_snapshot = AsyncMock(return_value=None)
     repo.get_pre_call_context = AsyncMock(return_value=snapshot)
     monkeypatch.setattr("app.voice.context.AgentRepository", lambda _s: repo)
 

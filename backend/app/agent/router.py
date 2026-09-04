@@ -12,8 +12,12 @@ from app.agent.orchestrator import CallContextService, CallOrchestrator
 from app.agent.schemas import (
     AgentPreCallContext,
     CallCompleteInput,
+    CallFilter,
     CallJobCreateInput,
     CallPrepareInput,
+    CallResponse,
+    SalesHandoffFilter,
+    SalesHandoffResponse,
     ToolExecuteRequest,
     ToolResponse,
 )
@@ -22,6 +26,7 @@ from app.auth.dependencies import get_request_context_dep, require_permission
 from app.core.permissions import Permission, ensure_tenant_resource_access, resolve_tenant_scope
 from app.core.request_context import RequestContext
 from app.db.session import get_db_session
+from app.shared.schemas import PaginatedResponse, PaginationParams
 
 router = APIRouter(prefix="/agent", tags=["AI Voice Agent CRM"])
 
@@ -265,3 +270,66 @@ async def get_eligible_call_jobs(
     orchestrator = CallOrchestrator(session)
     jobs = await orchestrator.get_next_eligible_jobs(tenant_id=tenant_id, limit=limit)
     return {"success": True, "data": jobs}
+
+
+@router.get(
+    "/calls",
+    response_model=PaginatedResponse[CallResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List Calls",
+    description=(
+        "List and filter voice/telephony calls with pagination, for "
+        "dashboard/reporting reads."
+    ),
+)
+async def list_calls(
+    lead_id: UUID | None = Query(default=None, description="Filter by lead ID"),
+    customer_id: UUID | None = Query(default=None, description="Filter by customer ID"),
+    call_status: str | None = Query(
+        default=None, alias="status", description="Filter by call status"
+    ),
+    outcome: str | None = Query(default=None, description="Filter by call outcome"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    context: RequestContext = Depends(require_permission(Permission.LEAD_READ)),
+    session: AsyncSession = Depends(get_db_session),
+) -> PaginatedResponse[CallResponse]:
+    """List calls endpoint."""
+    tenant_id = resolve_tenant_scope(context)
+    filters = CallFilter(
+        lead_id=lead_id, customer_id=customer_id, status=call_status, outcome=outcome
+    )
+    pagination = PaginationParams(page=page, page_size=page_size)
+    gateway = AgentGateway(session)
+    return await gateway.list_calls(tenant_id, filters, pagination)
+
+
+@router.get(
+    "/sales-handoffs",
+    response_model=PaginatedResponse[SalesHandoffResponse],
+    status_code=status.HTTP_200_OK,
+    summary="List Sales Handoffs",
+    description=(
+        "List and filter AI-to-human sales handoff requests with pagination, "
+        "for dashboard/reporting reads."
+    ),
+)
+async def list_sales_handoffs(
+    lead_id: UUID | None = Query(default=None, description="Filter by lead ID"),
+    handoff_status: str | None = Query(
+        default=None, alias="status", description="Filter by handoff status"
+    ),
+    assigned_user_id: UUID | None = Query(default=None, description="Filter by assigned user"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    context: RequestContext = Depends(require_permission(Permission.LEAD_READ)),
+    session: AsyncSession = Depends(get_db_session),
+) -> PaginatedResponse[SalesHandoffResponse]:
+    """List sales handoffs endpoint."""
+    tenant_id = resolve_tenant_scope(context)
+    filters = SalesHandoffFilter(
+        lead_id=lead_id, status=handoff_status, assigned_user_id=assigned_user_id
+    )
+    pagination = PaginationParams(page=page, page_size=page_size)
+    service = SalesHandoffService(session)
+    return await service.list_handoffs(tenant_id, filters, pagination)

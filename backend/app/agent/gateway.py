@@ -7,8 +7,10 @@ interface only -- this module never touches httpx/Superfone HTTP shapes
 directly (skills/system.md rule #31).
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from math import ceil
 from typing import Any
 from urllib.parse import urlencode
 from uuid import UUID
@@ -22,12 +24,14 @@ from app.agent.orchestrator import (
     validate_job_status_transition,
 )
 from app.agent.repository import AgentRepository
+from app.agent.schemas import CallFilter, CallResponse
 from app.core.config import settings
 from app.core.constants import API_V1_PREFIX
 from app.core.exceptions import AppError, ForbiddenError, NotFoundError
 from app.events.model import EventType
 from app.events.publisher import publish_event
 from app.integrations.superfone.factory import get_sfvopi_client
+from app.shared.schemas import PaginatedResponse, PaginationParams
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +49,65 @@ TERMINAL_OUTCOMES = {
     "rejected",
 }
 
+# Strong references to the fire-and-forget room pre-warm tasks below, so the
+# event loop cannot garbage-collect one mid-flight (asyncio only holds a weak
+# reference to a Task once nothing else does). Self-cleaning via the done
+# callback -- this never grows unbounded.
+_prewarm_tasks: set[asyncio.Task[None]] = set()
+
+
+def _fire_and_forget(coro: Any) -> None:
+    task = asyncio.create_task(coro)
+    _prewarm_tasks.add(task)
+    task.add_done_callback(_prewarm_tasks.discard)
+
+
+async def _prewarm_voice_room(
+    tenant_id: UUID, call_job_id: UUID, call_attempt_id: UUID, lead_id: UUID | None
+) -> None:
+    """Best-effort: create the LiveKit room before the phone has even rung.
+
+    `handle_media_stream` (see `app/voice/service.py`) creates this same room
+    -- by the same deterministic name -- the moment the customer's media
+    WebSocket opens, i.e. after they have already picked up. Every millisecond
+    that HTTP round trip to LiveKit's control plane takes is currently dead
+    air. Firing it here, right as the outbound call is placed, gives LiveKit
+    the whole ring duration to finish room setup instead of paying for it once
+    the customer is already listening.
+
+    Never awaited by the caller and never allowed to affect call placement:
+    `ensure_room` already never raises (see its docstring), and this module
+    must not gain a second, less forgiving failure mode purely for a latency
+    optimisation. `handle_media_stream`'s own `ensure_room` call is unchanged
+    and remains the real guarantee -- LiveKit's CreateRoom is idempotent, so
+    that call is a fast confirmation when this one already won the race, and
+    the normal (slower) path when it didn't. A call that rings and is never
+    answered leaves an empty room LiveKit tears down itself after
+    `ROOM_EMPTY_TIMEOUT_SECONDS`; nothing here needs to clean that up.
+
+    Imports `app.voice.livekit_gateway` lazily, same reasoning as every other
+    lazy LiveKit import in the voice package: a deployment running Superfone
+    calls without the voice/AI layer configured should not pay for it, and
+    must not fail placing a plain call over it.
+    """
+    from app.voice import livekit_gateway
+
+    if not livekit_gateway.is_voice_agent_enabled():
+        return
+    room_name = livekit_gateway.room_name_for_call(call_job_id, call_attempt_id)
+    try:
+        await livekit_gateway.ensure_room(
+            room_name,
+            metadata={
+                "tenant_id": str(tenant_id),
+                "call_job_id": str(call_job_id),
+                "call_attempt_id": str(call_attempt_id),
+                "lead_id": str(lead_id) if lead_id else "",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 -- best-effort, see docstring
+        logger.info(f"Voice room pre-warm failed for {room_name!r} (non-fatal): {exc!s}")
+
 
 class AgentGateway:
     """Boundary abstraction for managing AI agent call lifecycles, context
@@ -55,6 +118,24 @@ class AgentGateway:
         self.repository = AgentRepository(session)
         self.orchestrator = CallOrchestrator(session, max_concurrent_calls)
         self.context_service = CallContextService(session)
+
+    async def list_calls(
+        self,
+        tenant_id: UUID | None,
+        filters: CallFilter,
+        pagination: PaginationParams,
+    ) -> PaginatedResponse[CallResponse]:
+        """List calls for dashboard/reporting reads."""
+        rows, total = await self.repository.search_calls(tenant_id, filters, pagination)
+        items = [CallResponse.model_validate(r) for r in rows]
+        pages = ceil(total / pagination.page_size) if pagination.page_size > 0 else 0
+        return PaginatedResponse[CallResponse](
+            items=items,
+            page=pagination.page,
+            page_size=pagination.page_size,
+            total=total,
+            pages=pages,
+        )
 
     async def prepare_call(self, tenant_id: UUID, call_job_id: UUID) -> dict[str, Any]:
         """Prepare call job: Build deterministic snapshot context and
@@ -239,6 +320,16 @@ class AgentGateway:
         On failure, reuses record_call_completed's existing retry-policy
         machinery instead of duplicating it -- a failed placement is treated
         as a 'technical_failure' outcome, same as any other call failure."""
+        # Fired first and never awaited: the LiveKit room this attempt will
+        # need gets however long the phone rings for to be ready, running
+        # concurrently with the customer lookup, the SFVoPI dial itself, and
+        # the DB writes below -- see `_prewarm_voice_room`'s docstring.
+        _fire_and_forget(
+            _prewarm_voice_room(
+                tenant_id, job_row["id"], att_row["id"], job_row["lead_id"]
+            )
+        )
+
         customer_res = await self.session.execute(
             text(
                 "SELECT phone FROM public.customers WHERE id = :id AND tenant_id = :tenant_id"

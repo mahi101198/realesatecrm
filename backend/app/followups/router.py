@@ -85,6 +85,9 @@ async def list_followups(
     scheduled_after: Annotated[
         datetime | None, Query(description="Scheduled on or after timestamp")
     ] = None,
+    query: Annotated[
+        str | None, Query(description="Search customer name, phone, lead, or reason")
+    ] = None,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 25,
     context: RequestContext = Depends(require_permission(Permission.LEAD_READ)),
@@ -100,6 +103,7 @@ async def list_followups(
         follow_up_type=follow_up_type,
         scheduled_before=scheduled_before,
         scheduled_after=scheduled_after,
+        query=query,
     )
     pagination = PaginationParams(page=page, page_size=page_size)
     service = FollowUpService(session)

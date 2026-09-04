@@ -17,10 +17,13 @@ from app.agent.schemas import (
     AgentPropertyInterestSummary,
     AgentRelationshipSummary,
     AgentSalesContextSummary,
+    CallFilter,
+    SalesHandoffFilter,
 )
 from app.core.exceptions import NotFoundError
 from app.events.model import EventType
 from app.events.publisher import publish_event
+from app.shared.schemas import PaginationParams
 
 logger = logging.getLogger(__name__)
 
@@ -422,6 +425,39 @@ class AgentRepository:
             },
         )
         return dict(res.mappings().one())
+
+    async def get_latest_call_context_snapshot(
+        self, tenant_id: UUID | None, call_job_id: UUID
+    ) -> dict[str, Any] | None:
+        """The most recent `agent_call_contexts` snapshot for one call job, or None.
+
+        This is the SAME payload shape `get_pre_call_context` builds live (see
+        `save_agent_call_context_snapshot`'s caller in `CallContextService`) --
+        `AgentGateway.prepare_call` already ran the six-query aggregation and
+        persisted its result before the call was ever dialed. A caller with a
+        `call_job_id` should read that instead of re-running the aggregation,
+        which is what `build_voice_call_context` does at answer time -- the one
+        moment on a live call where a customer is on the line waiting.
+        """
+        sql = text(
+            """
+            SELECT context_payload
+            FROM public.agent_call_contexts
+            WHERE call_job_id = :call_job_id
+              AND (CAST(:tenant_id AS uuid) IS NULL OR tenant_id = CAST(:tenant_id AS uuid))
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        )
+        res = await self.session.execute(sql, {"call_job_id": call_job_id, "tenant_id": tenant_id})
+        row = res.mappings().one_or_none()
+        if row is None:
+            return None
+        payload = row["context_payload"]
+        # asyncpg returns jsonb as a string unless a codec is registered
+        # (none is, here -- see the explicit `json.dumps` above on write).
+        parsed: dict[str, Any] = json.loads(payload) if isinstance(payload, str) else payload
+        return parsed
 
     # ---------------------------------------------------------------------------
     # STUCK JOB RECOVERY
@@ -964,6 +1000,132 @@ class AgentRepository:
         res = await self.session.execute(sql, {"id": handoff_id, "tenant_id": tenant_id})
         row = res.mappings().one_or_none()
         return dict(row) if row else None
+
+    async def search_calls(
+        self,
+        tenant_id: UUID | None,
+        filters: CallFilter,
+        pagination: PaginationParams,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Search and list voice/telephony calls with filtering and pagination."""
+        where_conditions: list[str] = ["1=1"]
+        params: dict[str, Any] = {
+            "limit": pagination.page_size,
+            "offset": pagination.offset,
+        }
+
+        if tenant_id is not None:
+            where_conditions.append("c.tenant_id = :tenant_id")
+            params["tenant_id"] = tenant_id
+        if filters.lead_id:
+            where_conditions.append("c.lead_id = :filter_lead_id")
+            params["filter_lead_id"] = filters.lead_id
+        if filters.customer_id:
+            where_conditions.append("c.customer_id = :filter_customer_id")
+            params["filter_customer_id"] = filters.customer_id
+        if filters.status:
+            where_conditions.append("c.status = CAST(:filter_status AS public.call_status)")
+            params["filter_status"] = filters.status
+        if filters.outcome:
+            where_conditions.append("c.outcome = CAST(:filter_outcome AS public.call_outcome)")
+            params["filter_outcome"] = filters.outcome
+
+        where_str = " AND ".join(where_conditions)
+
+        count_result = await self.session.execute(
+            text(f"SELECT COUNT(*) FROM public.calls c WHERE {where_str}"),  # noqa: S608
+            params,
+        )
+        total_count = count_result.scalar_one()
+
+        select_result = await self.session.execute(
+            text(
+                f"""
+                SELECT
+                    c.*,
+                    cust.full_name       AS customer_name,
+                    cust.phone           AS customer_phone,
+                    cust.city            AS customer_city,
+                    l.lead_number        AS lead_number,
+                    l.status::text       AS lead_status,
+                    u.name               AS assigned_agent_name
+                FROM public.calls c
+                LEFT JOIN public.customers cust ON cust.id = c.customer_id
+                LEFT JOIN public.leads l ON l.id = c.lead_id
+                LEFT JOIN public.users u ON u.id = c.assigned_sales_agent_id
+                WHERE {where_str}
+                ORDER BY c.initiated_at DESC
+                LIMIT :limit OFFSET :offset
+                """  # noqa: S608
+            ),
+            params,
+        )
+        rows = select_result.mappings().all()
+        return [dict(r) for r in rows], total_count
+
+    async def search_sales_handoffs(
+        self,
+        tenant_id: UUID | None,
+        filters: SalesHandoffFilter,
+        pagination: PaginationParams,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Search and list sales handoff requests with filtering and pagination."""
+        where_conditions: list[str] = ["1=1"]
+        params: dict[str, Any] = {
+            "limit": pagination.page_size,
+            "offset": pagination.offset,
+        }
+
+        if tenant_id is not None:
+            where_conditions.append("sh.tenant_id = :tenant_id")
+            params["tenant_id"] = tenant_id
+        if filters.lead_id:
+            where_conditions.append("sh.lead_id = :filter_lead_id")
+            params["filter_lead_id"] = filters.lead_id
+        if filters.status:
+            where_conditions.append("sh.status = :filter_status")
+            params["filter_status"] = filters.status
+        if filters.assigned_user_id:
+            where_conditions.append("sh.assigned_user_id = :filter_assigned_user_id")
+            params["filter_assigned_user_id"] = filters.assigned_user_id
+
+        where_str = " AND ".join(where_conditions)
+
+        count_result = await self.session.execute(
+            text(f"SELECT COUNT(*) FROM public.sales_handoffs sh WHERE {where_str}"),  # noqa: S608
+            params,
+        )
+        total_count = count_result.scalar_one()
+
+        select_result = await self.session.execute(
+            text(
+                f"""
+                SELECT
+                    sh.*,
+                    cust.full_name       AS customer_name,
+                    cust.phone           AS customer_phone,
+                    cust.email           AS customer_email,
+                    cust.city            AS customer_city,
+                    l.lead_number        AS lead_number,
+                    l.status::text       AS lead_status,
+                    l.budget_min         AS lead_budget_min,
+                    l.budget_max         AS lead_budget_max,
+                    u.name               AS assigned_user_name,
+                    u.email              AS assigned_user_email,
+                    u.phone              AS assigned_user_phone
+                FROM public.sales_handoffs sh
+                LEFT JOIN public.customers cust ON cust.id = sh.customer_id
+                LEFT JOIN public.leads l ON l.id = sh.lead_id
+                LEFT JOIN public.users u ON u.id = sh.assigned_user_id
+                WHERE {where_str}
+                ORDER BY sh.requested_at DESC
+                LIMIT :limit OFFSET :offset
+                """  # noqa: S608
+            ),
+            params,
+        )
+        rows = select_result.mappings().all()
+        return [dict(r) for r in rows], total_count
 
     async def get_user_phone(self, tenant_id: UUID, user_id: UUID) -> str | None:
         """Fetch a staff user's registered phone number, scoped to tenant."""

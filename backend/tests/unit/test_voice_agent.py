@@ -58,6 +58,49 @@ def _agent(**context_overrides) -> VoiceAgent:
     return agent
 
 
+class _FakeWriteSession:
+    """Stands in for the short-lived session `_persist_message` opens.
+
+    An async context manager because `async with factory() as session:` is
+    exactly what production code does with a real `async_sessionmaker`.
+    """
+
+    async def __aenter__(self) -> "_FakeWriteSession":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+    async def commit(self) -> None:
+        pass
+
+
+def _patch_transcript_writes(
+    monkeypatch: pytest.MonkeyPatch, recorder: list[dict], *, fail: bool = False
+) -> None:
+    """Intercept `VoiceAgent._persist_message`'s background writes.
+
+    `_record` no longer writes through `agent.repository` (see
+    `_persist_message`'s docstring): it opens its own short-lived session via
+    `app.db.session.async_session_factory` and a fresh `VoiceCallRepository` on
+    it, specifically so it never shares `self.session` with the rest of the
+    call. Tests that care what got "written" must patch those two seams, not
+    `agent.repository`.
+    """
+
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def append_message(self, **kwargs: object) -> None:
+            if fail:
+                raise RuntimeError("db down")
+            recorder.append(kwargs)
+
+    monkeypatch.setattr("app.db.session.async_session_factory", lambda: _FakeWriteSession())
+    monkeypatch.setattr("app.voice.agent.VoiceCallRepository", _FakeRepo)
+
+
 # ---------------------------------------------------------------------------
 # Security: the read-only, allowlisted tool surface
 # ---------------------------------------------------------------------------
@@ -132,6 +175,9 @@ async def test_allowlisted_tool_reaches_the_registry_with_the_read_context(
 
     handler = AsyncMock(return_value={"success": True, "units": []})
     monkeypatch.setitem(TOOL_REGISTRY, "search_properties", handler)
+    monkeypatch.setattr(
+        "app.db.session.async_session_factory", lambda: _FakeWriteSession()
+    )
 
     agent = _agent()
     result = await agent._execute_tool("search_properties", {"budget_max": 5000000})
@@ -148,6 +194,9 @@ async def test_string_uuids_from_the_model_are_coerced(
 
     handler = AsyncMock(return_value={"success": True})
     monkeypatch.setitem(TOOL_REGISTRY, "get_property_details", handler)
+    monkeypatch.setattr(
+        "app.db.session.async_session_factory", lambda: _FakeWriteSession()
+    )
 
     property_id = uuid4()
     await _agent()._execute_tool("get_property_details", {"property_id": str(property_id)})
@@ -161,9 +210,29 @@ async def test_malformed_uuids_are_dropped_not_forwarded(
 
     handler = AsyncMock(return_value={"success": True})
     monkeypatch.setitem(TOOL_REGISTRY, "get_property_details", handler)
+    monkeypatch.setattr(
+        "app.db.session.async_session_factory", lambda: _FakeWriteSession()
+    )
 
     await _agent()._execute_tool("get_property_details", {"property_id": "not-a-uuid"})
     assert "property_id" not in handler.await_args.kwargs
+
+
+async def test_execute_tool_degrades_cleanly_with_no_session_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A live call must never raise into the media session over a missing DB."""
+    from app.agent.tools import TOOL_REGISTRY
+
+    handler = AsyncMock(return_value={"success": True})
+    monkeypatch.setitem(TOOL_REGISTRY, "search_properties", handler)
+    monkeypatch.setattr("app.db.session.async_session_factory", None)
+
+    result = await _agent()._execute_tool("search_properties", {})
+
+    assert result["success"] is False
+    assert result["error_code"] == "NO_DB_SESSION"
+    handler.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -175,14 +244,17 @@ async def test_respond_returns_the_models_line_and_records_both_turns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(voice_llm, "call_with_tools", AsyncMock(return_value="  Sure, 3BHK.  "))
+    written: list[dict] = []
+    _patch_transcript_writes(monkeypatch, written)
     agent = _agent()
 
     spoken = await agent.respond("Do you have a 3BHK?")
+    await agent.flush_pending_writes()
 
     assert spoken == "Sure, 3BHK."
     assert [t["speaker"] for t in agent.transcript] == ["customer", "agent"]
     assert agent.transcript[0]["text"] == "Do you have a 3BHK?"
-    assert agent.repository.append_message.await_count == 2
+    assert len(written) == 2
 
 
 async def test_spoken_replies_are_trimmed_to_a_speakable_length(
@@ -241,10 +313,13 @@ async def test_a_transcript_write_failure_never_breaks_the_turn(
 ) -> None:
     """Losing a transcript row is regrettable; dropping the call is not allowed."""
     monkeypatch.setattr(voice_llm, "call_with_tools", AsyncMock(return_value="Yes."))
+    _patch_transcript_writes(monkeypatch, [], fail=True)
     agent = _agent()
-    agent.repository.append_message.side_effect = RuntimeError("db down")
 
     assert await agent.respond("hi") == "Yes."
+    # The failure happens in a background task; draining it must not raise
+    # either, or teardown itself would become the thing that breaks the call.
+    await agent.flush_pending_writes()
 
 
 # ---------------------------------------------------------------------------

@@ -115,7 +115,7 @@ class PropertyRepository:
         for key, value in data_dict.items():
             param_key = f"val_{key}"
             if key in enum_casts:
-                set_clauses.append(f"{key} = :{param_key}::{enum_casts[key]}")
+                set_clauses.append(f"{key} = CAST(:{param_key} AS {enum_casts[key]})")
             else:
                 set_clauses.append(f"{key} = :{param_key}")
             params[param_key] = value
@@ -138,24 +138,31 @@ class PropertyRepository:
         return dict(row) if row else None
 
     async def get_by_id(self, tenant_id: UUID | None, property_id: UUID) -> dict[str, Any] | None:
-        """Fetch property by ID."""
+        """Fetch property by ID with joined project, property_type, and owner details."""
+        where_clause = "WHERE p.id = :property_id AND p.deleted_at IS NULL"
+        params: dict[str, Any] = {"property_id": property_id}
         if tenant_id is not None:
-            query = text(
-                """
-                SELECT * FROM public.properties
-                WHERE id = :property_id AND tenant_id = :tenant_id AND deleted_at IS NULL
-                """
-            )
-            params = {"property_id": property_id, "tenant_id": tenant_id}
-        else:
-            query = text(
-                """
-                SELECT * FROM public.properties
-                WHERE id = :property_id AND deleted_at IS NULL
-                """
-            )
-            params = {"property_id": property_id}
+            where_clause += " AND p.tenant_id = :tenant_id"
+            params["tenant_id"] = tenant_id
 
+        query = text(
+            f"""
+            SELECT
+                p.*,
+                pr.name          AS project_name,
+                pr.locality      AS project_locality,
+                pr.city          AS project_city,
+                pt.name          AS property_type_name,
+                c.full_name      AS current_owner_name,
+                c.phone          AS current_owner_phone
+            FROM public.properties p
+            LEFT JOIN public.projects pr ON pr.id = p.project_id
+            LEFT JOIN public.property_types pt ON pt.id = p.property_type_id
+            LEFT JOIN public.property_ownerships po ON po.property_id = p.id AND po.ownership_status = 'active'
+            LEFT JOIN public.customers c ON c.id = po.customer_id
+            {where_clause}
+            """
+        )
         result = await self.session.execute(query, params)
         row = result.mappings().one_or_none()
         return dict(row) if row else None
@@ -166,76 +173,97 @@ class PropertyRepository:
         filters: PropertySearchFilter,
         pagination: PaginationParams,
     ) -> tuple[list[dict[str, Any]], int]:
-        """Search and filter property inventory in PostgreSQL using indexes."""
-        where_conditions = ["deleted_at IS NULL"]
+        """Search and filter property inventory in PostgreSQL using indexes and rich joins."""
+        where_conditions = ["p.deleted_at IS NULL"]
         params: dict[str, Any] = {
             "limit": pagination.page_size,
             "offset": pagination.offset,
         }
 
         if tenant_id is not None:
-            where_conditions.append("tenant_id = :tenant_id")
+            where_conditions.append("p.tenant_id = :tenant_id")
             params["tenant_id"] = tenant_id
 
         if filters.project_id:
-            where_conditions.append("project_id = :filter_project_id")
+            where_conditions.append("p.project_id = :filter_project_id")
             params["filter_project_id"] = filters.project_id
 
         if filters.property_type_id:
-            where_conditions.append("property_type_id = :filter_type_id")
+            where_conditions.append("p.property_type_id = :filter_type_id")
             params["filter_type_id"] = filters.property_type_id
 
         if filters.status:
-            where_conditions.append("status = CAST(:filter_status AS public.property_status)")
+            where_conditions.append("p.status = CAST(:filter_status AS public.property_status)")
             params["filter_status"] = filters.status
 
         if filters.min_budget is not None:
-            where_conditions.append("COALESCE(offer_price, base_price) >= :min_budget")
+            where_conditions.append("COALESCE(p.offer_price, p.base_price) >= :min_budget")
             params["min_budget"] = filters.min_budget
 
         if filters.max_budget is not None:
-            where_conditions.append("COALESCE(offer_price, base_price) <= :max_budget")
+            where_conditions.append("COALESCE(p.offer_price, p.base_price) <= :max_budget")
             params["max_budget"] = filters.max_budget
 
         if filters.min_area is not None:
-            where_conditions.append("COALESCE(plot_area, built_up_area, carpet_area) >= :min_area")
+            where_conditions.append("COALESCE(p.plot_area, p.built_up_area, p.carpet_area) >= :min_area")
             params["min_area"] = filters.min_area
 
         if filters.max_area is not None:
-            where_conditions.append("COALESCE(plot_area, built_up_area, carpet_area) <= :max_area")
+            where_conditions.append("COALESCE(p.plot_area, p.built_up_area, p.carpet_area) <= :max_area")
             params["max_area"] = filters.max_area
 
         if filters.bedrooms is not None:
-            where_conditions.append("bedrooms = :filter_bedrooms")
+            where_conditions.append("p.bedrooms = :filter_bedrooms")
             params["filter_bedrooms"] = filters.bedrooms
 
         if filters.facing:
-            where_conditions.append("facing = CAST(:filter_facing AS public.property_facing)")
+            where_conditions.append("p.facing = CAST(:filter_facing AS public.property_facing)")
             params["filter_facing"] = filters.facing
 
         if filters.is_corner is not None:
-            where_conditions.append("is_corner = :filter_is_corner")
+            where_conditions.append("p.is_corner = :filter_is_corner")
             params["filter_is_corner"] = filters.is_corner
 
         if filters.query:
             where_conditions.append(
-                "(property_code ILIKE :search_q OR "
-                "unit_number ILIKE :search_q OR "
-                "block ILIKE :search_q)"
+                "(p.property_code ILIKE :search_q OR "
+                "p.unit_number ILIKE :search_q OR "
+                "p.block ILIKE :search_q OR "
+                "pr.name ILIKE :search_q OR "
+                "pr.locality ILIKE :search_q)"
             )
             params["search_q"] = f"%{filters.query.strip()}%"
 
         where_str = " AND ".join(where_conditions)
 
-        count_query = text(f"SELECT COUNT(*) FROM public.properties WHERE {where_str}")  # noqa: S608
+        count_query = text(  # noqa: S608
+            f"""
+            SELECT COUNT(*)
+            FROM public.properties p
+            LEFT JOIN public.projects pr ON pr.id = p.project_id
+            WHERE {where_str}
+            """
+        )
         count_result = await self.session.execute(count_query, params)
         total_count = count_result.scalar_one()
 
         select_query = text(
             f"""
-            SELECT * FROM public.properties
+            SELECT
+                p.*,
+                pr.name          AS project_name,
+                pr.locality      AS project_locality,
+                pr.city          AS project_city,
+                pt.name          AS property_type_name,
+                c.full_name      AS current_owner_name,
+                c.phone          AS current_owner_phone
+            FROM public.properties p
+            LEFT JOIN public.projects pr ON pr.id = p.project_id
+            LEFT JOIN public.property_types pt ON pt.id = p.property_type_id
+            LEFT JOIN public.property_ownerships po ON po.property_id = p.id AND po.ownership_status = 'active'
+            LEFT JOIN public.customers c ON c.id = po.customer_id
             WHERE {where_str}
-            ORDER BY created_at DESC
+            ORDER BY p.created_at DESC
             LIMIT :limit OFFSET :offset
             """  # noqa: S608
         )
@@ -395,7 +423,7 @@ class PropertyRepository:
         for key, value in data_dict.items():
             param_key = f"val_{key}"
             if key == "status":
-                set_clauses.append(f"{key} = :{param_key}::public.construction_milestone_status")
+                set_clauses.append(f"{key} = CAST(:{param_key} AS public.construction_milestone_status)")
             else:
                 set_clauses.append(f"{key} = :{param_key}")
             params[param_key] = value
@@ -422,11 +450,19 @@ class PropertyRepository:
         ownership_result = await self.session.execute(
             text(
                 """
-                SELECT id, customer_id, purchase_purpose, previous_ownership_id,
-                       ownership_start_date, ownership_end_date, ownership_status
-                FROM public.property_ownerships
-                WHERE property_id = :property_id AND tenant_id = :tenant_id
-                ORDER BY ownership_start_date ASC, created_at ASC
+                SELECT po.id, po.customer_id, po.purchase_purpose, po.previous_ownership_id,
+                       po.ownership_start_date, po.ownership_end_date, po.ownership_status,
+                       c.full_name     AS customer_name,
+                       c.phone         AS customer_phone,
+                       c.email         AS customer_email,
+                       c.city          AS customer_city,
+                       ps.sale_amount  AS sale_amount,
+                       ps.sale_date    AS sale_date
+                FROM public.property_ownerships po
+                LEFT JOIN public.customers c ON c.id = po.customer_id
+                LEFT JOIN public.property_sales ps ON ps.id = po.sale_id
+                WHERE po.property_id = :property_id AND po.tenant_id = :tenant_id
+                ORDER BY po.ownership_start_date ASC, po.created_at ASC
                 """
             ),
             {"property_id": property_id, "tenant_id": tenant_id},
@@ -439,10 +475,13 @@ class PropertyRepository:
         co_owner_result = await self.session.execute(
             text(
                 """
-                SELECT ownership_id, customer_id, role, share_percentage
-                FROM public.property_ownership_co_owners
-                WHERE ownership_id = ANY(:ownership_ids) AND tenant_id = :tenant_id
-                ORDER BY created_at ASC
+                SELECT pco.ownership_id, pco.customer_id, pco.role, pco.share_percentage,
+                       c.full_name AS customer_name,
+                       c.phone AS customer_phone
+                FROM public.property_ownership_co_owners pco
+                LEFT JOIN public.customers c ON c.id = pco.customer_id
+                WHERE pco.ownership_id = ANY(:ownership_ids) AND pco.tenant_id = :tenant_id
+                ORDER BY pco.created_at ASC
                 """
             ),
             {"ownership_ids": ownership_ids, "tenant_id": tenant_id},

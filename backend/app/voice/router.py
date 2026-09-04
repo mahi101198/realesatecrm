@@ -30,11 +30,19 @@ AUTH
 import contextlib
 import logging
 from typing import Annotated
+from uuid import UUID
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, status
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.dependencies import require_permission
 from app.core.exceptions import AppError
+from app.core.permissions import Permission, resolve_tenant_scope
+from app.core.request_context import RequestContext
 from app.db import session as db_session
+from app.db.session import get_db_session
+from app.voice import test_service
 from app.voice.service import VoiceService
 from app.webhooks.superfone.security import verify_sfvopi_webhook_token
 
@@ -111,3 +119,68 @@ async def voice_media_stream(
     # error worth surfacing.
     with contextlib.suppress(RuntimeError):
         await websocket.close(code=WS_NORMAL_CLOSURE)
+
+
+# -----------------------------------------------------------------------------
+# Manual test-call harness (dashboard /voice-test page) -- see
+# `app/voice/test_service.py`'s module docstring for why this exists and how
+# it stays out of the real dialer's way. Staff-only, same permission
+# `/agent/calls/start` already requires for placing a real call.
+# -----------------------------------------------------------------------------
+
+
+class VoiceTestStartInput(BaseModel):
+    lead_id: UUID
+
+
+@router.post(
+    "/test/start",
+    status_code=status.HTTP_200_OK,
+    summary="Start a browser test call",
+    description=(
+        "Create a test call for a lead and start the AI voice agent in a "
+        "LiveKit room, without going through Superfone. Returns a LiveKit "
+        "token the dashboard's /voice-test page uses to join the same room "
+        "as the 'customer', over the browser's own mic/speaker."
+    ),
+)
+async def start_voice_test_call(
+    body: VoiceTestStartInput,
+    context: RequestContext = Depends(require_permission(Permission.LEAD_UPDATE)),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, object]:
+    tenant_id = resolve_tenant_scope(context)
+    if tenant_id is None:
+        raise AppError(
+            message="Tenant scope is required.", code="TENANT_REQUIRED", status_code=400
+        )
+    result = await test_service.start_test_call(
+        session,
+        tenant_id=tenant_id,
+        lead_id=body.lead_id,
+        tester_identity=f"tester-{context.user_id.hex}",
+    )
+    return {"success": True, "data": result}
+
+
+@router.post(
+    "/test/{call_id}/stop",
+    status_code=status.HTTP_200_OK,
+    summary="End a browser test call",
+    description=(
+        "Signal a running test call's AI agent to end and record its outcome, "
+        "for when the tester leaves the room without the browser tab itself "
+        "triggering the room-disconnect teardown."
+    ),
+)
+async def stop_voice_test_call(
+    call_id: UUID,
+    context: RequestContext = Depends(require_permission(Permission.LEAD_UPDATE)),
+) -> dict[str, object]:
+    tenant_id = resolve_tenant_scope(context)
+    if tenant_id is None:
+        raise AppError(
+            message="Tenant scope is required.", code="TENANT_REQUIRED", status_code=400
+        )
+    stopped = await test_service.stop_test_call(call_id, tenant_id=tenant_id)
+    return {"success": True, "data": {"stopped": stopped}}

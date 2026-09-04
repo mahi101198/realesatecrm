@@ -45,6 +45,7 @@ FAILURE POSTURE (spec section 20)
     stays consistent -- it just routes to a person instead of to a guess.
 """
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -116,6 +117,11 @@ class VoiceAgent:
         self._read_context = build_agent_read_context(
             context.tenant_id, request_id=f"voice-{context.call_attempt_id}"
         )
+        # Transcript writes fired by `_record` land here rather than being
+        # awaited inline -- see `_record`'s docstring for why. Drained by
+        # `flush_pending_writes` at call teardown, never mid-call: nothing
+        # in the turn-taking path needs a write to have landed yet.
+        self._pending_writes: list[asyncio.Task[None]] = []
 
     # ------------------------------------------------------------------
     # Turn taking
@@ -176,27 +182,85 @@ class VoiceAgent:
         return text
 
     async def _record(self, speaker: str, text: str) -> None:
-        """Append one turn to the in-memory transcript and to `call_messages`.
+        """Append one turn to the in-memory transcript, and schedule its write.
 
-        A persistence failure is logged and swallowed: losing a transcript row
-        is regrettable, dropping the customer's call over it is not acceptable.
+        DELIBERATELY NON-BLOCKING. `_record` sits on the turn-taking critical
+        path twice per turn -- once before the LLM call starts (recording the
+        customer's utterance) and once after the LLM answers but before that
+        answer is spoken (recording the reply, from `_say`). Supabase for this
+        deployment is a cross-region hop from where the agent runs (LiveKit
+        Inference is regional/edge; Postgres is not), so an `await`ed INSERT
+        here was adding a full network round trip in BOTH places -- one of them
+        directly delaying time-to-first-audio on every single reply. The turn
+        itself does not need the write to have landed; only call teardown does
+        (so a summary is never written for a transcript that silently failed to
+        persist), which is what `flush_pending_writes` is for.
         """
         self.transcript.append({"speaker": speaker, "text": text})
         self._sequence += 1
-        try:
-            await self.repository.append_message(
-                tenant_id=self.context.tenant_id,
-                call_id=self.context.call_id,
-                sequence_number=self._sequence,
-                speaker=speaker,
-                message_text=text,
-                language=self.context.preferred_language,
+        task = asyncio.create_task(
+            self._persist_message(sequence=self._sequence, speaker=speaker, text=text)
+        )
+        self._pending_writes.append(task)
+
+    async def _persist_message(self, *, sequence: int, speaker: str, text: str) -> None:
+        """Write one transcript row on ITS OWN session, off the turn-taking path.
+
+        Never `self.session`: that session is shared with the tool-calling loop
+        (`_execute_tool` runs mid-LLM-call, on `self.session`) and with the
+        end-of-call writes in `record_outcome`. SQLAlchemy's `AsyncSession` is
+        not safe for concurrent use by two coroutines at once, and a
+        fire-and-forget task on the same session that outlives the call it was
+        started from would race exactly those. A short-lived session per write
+        avoids that entirely, at the cost of one extra pooled connection per
+        message -- cheap, since a spoken turn is seconds apart from the next.
+
+        A persistence failure is logged and swallowed, same as before this was
+        made non-blocking: losing a transcript row is regrettable, dropping the
+        customer's call over it is not acceptable.
+        """
+        from app.db.session import async_session_factory
+
+        factory = async_session_factory
+        if factory is None:  # pragma: no cover -- lifespan guarantees this in prod
+            logger.warning(
+                f"No DB session factory; dropping transcript turn {sequence} for call "
+                f"{self.context.call_id}."
             )
+            return
+        try:
+            async with factory() as session:
+                await VoiceCallRepository(session).append_message(
+                    tenant_id=self.context.tenant_id,
+                    call_id=self.context.call_id,
+                    sequence_number=sequence,
+                    speaker=speaker,
+                    message_text=text,
+                    language=self.context.preferred_language,
+                )
+                await session.commit()
         except Exception as exc:  # noqa: BLE001 -- see docstring
             logger.warning(
-                f"Could not persist transcript turn {self._sequence} for call "
+                f"Could not persist transcript turn {sequence} for call "
                 f"{self.context.call_id}: {exc!s}"
             )
+
+    async def flush_pending_writes(self) -> None:
+        """Wait for every in-flight transcript write before the call ends.
+
+        Called once, from `VoiceService._finish`, AFTER media teardown but
+        BEFORE `summarise`/`record_outcome`: those read/write on `self.session`,
+        and while they never touch `call_messages`, letting a transcript write
+        still be in flight when the process moves on to tearing down the room
+        (or exiting, for a short-lived test call) risks losing the last turn or
+        two silently. `return_exceptions=True` because each task already caught
+        and logged its own failure in `_persist_message` -- this is a join, not
+        a second error path.
+        """
+        if not self._pending_writes:
+            return
+        await asyncio.gather(*self._pending_writes, return_exceptions=True)
+        self._pending_writes.clear()
 
     # ------------------------------------------------------------------
     # Tool surface (read-only, allowlisted -- mirrors the WhatsApp agent)
@@ -209,6 +273,20 @@ class VoiceAgent:
         the name, so the name is untrusted input. Even a write tool that slipped
         past would then hit `self._read_context`, which holds no write
         permissions -- the belt to this suspenders.
+
+        Runs on ITS OWN short-lived session, never `self.session`. Two reasons,
+        the second load-bearing:
+          1. it decouples a read lookup's latency from `self.session`, which
+             also carries the end-of-call writes in `record_outcome`;
+          2. `voice.llm.call_with_tools` runs every tool call in one model
+             round through `asyncio.gather` -- a turn that asks for a property
+             AND its project no longer pays for two round trips back-to-back.
+             `AsyncSession` is not safe for two coroutines at once, so THAT
+             concurrency is only safe because each call gets its own
+             connection here, same reasoning as `_persist_message`. All four
+             allowlisted tools are read-only, so a short-lived session per
+             call costs one extra pooled connection and only needs to see
+             committed rows, which is all a lookup ever needs.
         """
         if name not in ALLOWED_TOOL_NAMES:
             logger.warning(f"Voice agent requested non-allowlisted tool {name!r}; refusing.")
@@ -227,7 +305,19 @@ class VoiceAgent:
             return {"success": False, "error_code": "UNKNOWN_TOOL", "message": name}
 
         coerced = coerce_uuid_arguments(arguments)
-        return await handler(self._read_context, self.session, **coerced)
+
+        from app.db.session import async_session_factory
+
+        factory = async_session_factory
+        if factory is None:  # pragma: no cover -- lifespan guarantees this in prod
+            logger.warning(f"No DB session factory; cannot run voice tool {name!r}.")
+            return {
+                "success": False,
+                "error_code": "NO_DB_SESSION",
+                "message": "Database unavailable.",
+            }
+        async with factory() as session:
+            return await handler(self._read_context, session, **coerced)
 
     # ------------------------------------------------------------------
     # Completion
@@ -357,7 +447,7 @@ class VoiceAgent:
             next_best_action=result.get("next_best_action"),
             human_transfer_required=needs_human,
             # The voice channel reasons through LiveKit Inference, so the model
-            # stamped on the summary is VOICE_LLM_MODEL, never ANTHROPIC_MODEL.
+            # stamped on the summary is VOICE_LLM_MODEL, never GEMINI_MODEL.
             generated_by_model=None if result.get("degraded") else settings.VOICE_LLM_MODEL,
         )
 

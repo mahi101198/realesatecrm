@@ -1,5 +1,4 @@
-"""Customer Repository for PostgreSQL database access."""
-
+import json
 import logging
 from typing import Any
 from uuid import UUID
@@ -36,7 +35,7 @@ class CustomerRepository:
                 :address_line1, :city, :state, :country, :pincode,
                 :preferred_language, :preferred_contact_time, :do_not_call,
                 :do_not_whatsapp, :do_not_email, :whatsapp_opted_in,
-                :lead_source_id, :referred_by, :metadata
+                :lead_source_id, :referred_by, CAST(:metadata AS jsonb)
             )
             RETURNING *
             """
@@ -64,7 +63,7 @@ class CustomerRepository:
             "whatsapp_opted_in": data.whatsapp_opted_in,
             "lead_source_id": data.lead_source_id,
             "referred_by": data.referred_by,
-            "metadata": data.metadata or {},
+            "metadata": json.dumps(data.metadata or {}, default=str),
         }
         result = await self.session.execute(query, params)
         row = result.mappings().one()
@@ -114,12 +113,17 @@ class CustomerRepository:
 
         for key, value in data_dict.items():
             if value is not None:
+                if key == "metadata":
+                    value = json.dumps(value or {}, default=str)
                 update_fields[key] = value
 
         if not update_fields:
             return await self.get_by_id(tenant_id, customer_id)
 
-        set_clauses = [f"{key} = :{key}" for key in update_fields]
+        set_clauses = [
+            f"{key} = CAST(:{key} AS jsonb)" if key == "metadata" else f"{key} = :{key}"
+            for key in update_fields
+        ]
         set_clause_str = ", ".join(set_clauses)
 
         if tenant_id is not None:
